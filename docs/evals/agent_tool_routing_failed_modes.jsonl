@@ -1,0 +1,24 @@
+{"id":"fail_web_001","split":"failure","category":"web_schema","prompt":"Search the latest CDC guidance for resting heart rate and recovery.","gold_action":"web_search","needs_health_context":false}
+{"id":"fail_web_002","split":"failure","category":"web_schema","prompt":"Use web sources to explain what a low HRV can mean generally.","gold_action":"web_search","needs_health_context":false}
+{"id":"fail_web_003","split":"failure","category":"web_schema","prompt":"Look up recent evidence on sleep duration and cardiovascular risk.","gold_action":"web_search","needs_health_context":false}
+{"id":"fail_web_004","split":"failure","category":"web_schema","prompt":"Find source-backed guidance for improving VO2 max safely.","gold_action":"web_search","needs_health_context":false}
+{"id":"fail_web_005","split":"failure","category":"web_schema","prompt":"Can you research current AHA advice for blood pressure ranges?","gold_action":"web_search","needs_health_context":false}
+{"id":"fail_web_006","split":"failure","category":"web_schema","prompt":"Give me cited studies about resting heart rate trends and illness risk.","gold_action":"web_search","needs_health_context":false}
+{"id":"fail_data_001","split":"failure","category":"over_tooling","prompt":"What changed in my kidney metrics this week?","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_data_002","split":"failure","category":"over_tooling","prompt":"Explain this red heart graph in the app.","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_data_003","split":"failure","category":"over_tooling","prompt":"What is my current health status?","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_data_004","split":"failure","category":"over_tooling","prompt":"Is my heart good or bad based on the watch data?","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_data_005","split":"failure","category":"over_tooling","prompt":"What should I do next to improve based on my dashboard?","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_data_006","split":"failure","category":"over_tooling","prompt":"Why are my sleep and HRV worse than baseline?","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_data_007","split":"failure","category":"over_tooling","prompt":"Tell me what the liver card is showing right now.","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_data_008","split":"failure","category":"over_tooling","prompt":"Compare my recorded steps, sleep, and resting heart rate.","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_none_001","split":"failure","category":"no_action","prompt":"hi","gold_action":"no_action","needs_health_context":false}
+{"id":"fail_none_002","split":"failure","category":"no_action","prompt":"hello today","gold_action":"no_action","needs_health_context":false}
+{"id":"fail_none_003","split":"failure","category":"no_action","prompt":"what is up my dude","gold_action":"no_action","needs_health_context":false}
+{"id":"fail_none_004","split":"failure","category":"no_action","prompt":"thanks","gold_action":"no_action","needs_health_context":false}
+{"id":"fail_none_005","split":"failure","category":"no_action","prompt":"whta","gold_action":"no_action","needs_health_context":false}
+{"id":"fail_none_006","split":"failure","category":"no_action","prompt":"yo halo","gold_action":"no_action","needs_health_context":false}
+{"id":"fail_edge_001","split":"failure","category":"boundary","prompt":"What does low HRV mean?","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_edge_002","split":"failure","category":"boundary","prompt":"Search what low HRV means from reliable medical sources.","gold_action":"web_search","needs_health_context":false}
+{"id":"fail_edge_003","split":"failure","category":"boundary","prompt":"Do I need to worry about this resting heart rate spike?","gold_action":"data_recall","needs_health_context":true}
+{"id":"fail_edge_004","split":"failure","category":"boundary","prompt":"Look up whether resting heart rate spikes are linked with infections.","gold_action":"web_search","needs_health_context":false}

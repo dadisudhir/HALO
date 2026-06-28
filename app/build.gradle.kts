@@ -79,5 +79,8 @@ dependencies {
     implementation("com.facebook.soloader:soloader:0.10.5")
     implementation("com.facebook.fbjni:fbjni:0.7.0")
 
+    testImplementation(kotlin("test"))
+    testImplementation("org.json:json:20240303")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

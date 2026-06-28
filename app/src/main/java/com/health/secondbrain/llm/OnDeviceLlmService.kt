@@ -10,14 +10,15 @@ import kotlinx.coroutines.sync.withLock
 import org.pytorch.executorch.ExecutorchRuntimeException
 import org.pytorch.executorch.extension.llm.LlmCallback
 import org.pytorch.executorch.extension.llm.LlmModule
+import org.json.JSONObject
 import java.io.File
-import java.util.EnumMap
 
 data class AgentResponse(
     val text: String,
     val statusLine: String? = null,
     val usedTool: Boolean = false,
     val visual: AgentVisual? = null,
+    val decision: AgentDecision = AgentDecision.Unknown,
 )
 
 data class AgentVisual(
@@ -26,110 +27,82 @@ data class AgentVisual(
     val caption: String,
 )
 
-class OnDeviceLlmService(
-    context: Context,
-    private val generator: QwenLocalGenerator = QwenLocalGenerator(
-        context = context.applicationContext,
-    ),
-    private val toolBridgeClient: ToolBridgeClient = ToolBridgeClient(),
+data class AgentDecision(
+    val action: String,
+    val route: String,
+    val needsHealthContext: Boolean,
+    val toolName: String? = null,
+    val query: String? = null,
+    val answerSource: String,
 ) {
+    companion object {
+        val Unknown = AgentDecision(
+            action = "unknown",
+            route = "unknown",
+            needsHealthContext = false,
+            answerSource = "unknown",
+        )
+    }
+}
+
+class OnDeviceLlmService(
+    private val generator: LocalTextGenerator,
+    private val toolClient: AgentToolClient = ToolBridgeClient(),
+) {
+    constructor(context: Context) : this(
+        generator = QwenLocalGenerator(context.applicationContext),
+        toolClient = ToolBridgeClient(),
+    )
+
     suspend fun generateChat(
         context: HealthAgentContext,
         userMessage: String,
         onToken: ((String) -> Unit)? = null,
     ): AgentResponse {
-        classifyIntent(context, userMessage)?.let { intent ->
-            return when (intent.flow) {
-                GoldenFlow.Greeting -> AgentResponse(
-                    text = buildGreetingAnswer(context),
-                    statusLine = "local greeting",
-                )
-                GoldenFlow.HealthStatus -> AgentResponse(
-                    text = buildHealthStatusAnswer(context),
-                    statusLine = "local health status",
-                    visual = context.toAgentVisual("Current signal graph"),
-                )
-                GoldenFlow.NextStep -> buildNextStepAnswer(context, userMessage)
-                GoldenFlow.LocalInfo -> AgentResponse(
-                    text = buildLocalInfoAnswer(context),
-                    statusLine = "local context",
-                    visual = context.toAgentVisual("Referenced signal graph"),
-                )
-            }
-        }
-
-        val toolResult = if (shouldUseWebSearch(userMessage)) {
-            runCatching { toolBridgeClient.webSearch(searchQuery(userMessage)) }
-                .getOrElse { error ->
-                    return AgentResponse(
-                        text = "Web search is not connected right now, so I’m using HALO’s local context only.",
-                        statusLine = "web search unavailable",
-                        usedTool = true,
-                        visual = context.toAgentVisual("Tool requested this graph"),
-                    )
-                }
+        val plan = AgentPlanner.localPlanForGoldenFlow(context, userMessage)
+            ?: requestPlan(context, userMessage)
+        val toolExecution = if (plan.type == AgentPlanType.ToolRequest) {
+            executeApprovedTool(plan)
         } else {
             null
         }
-        val summarizedToolResult = toolResult?.let {
-            it.copy(content = summarizeWebContext(it.content).promptText)
-        }
+        val finalPlan = toolExecution?.plan ?: plan
 
         val prompt = HealthAgentPromptBuilder.buildChatPrompt(
             context = context,
             userMessage = userMessage,
-            toolResult = summarizedToolResult,
+            plan = finalPlan,
+            toolResult = toolExecution?.promptResult(),
         )
 
         return runCatching {
-            val streamModelOutput = context.hasRecordedBiometrics
             val rawText = generator.generate(
-                prompt,
-                onToken = onToken.takeIf { streamModelOutput },
+                prompt = prompt,
+                sequenceLength = finalSequenceLengthFor(finalPlan),
+                visibleCharLimit = finalVisibleCharLimitFor(finalPlan),
+                onToken = null,
+            )
+            val cleaned = cleanModelText(
+                raw = rawText,
+                context = context,
+                plan = finalPlan,
             )
             AgentResponse(
-                text = cleanModelText(rawText, context),
-                statusLine = summarizedToolResult?.let { "searched web with ${it.tool}" }
-                    ?: "answered from HALO health context",
-                usedTool = summarizedToolResult != null,
-                visual = summarizedToolResult?.let { context.toAgentVisual("Tool context graph") },
+                text = cleaned.text,
+                statusLine = statusLineFor(finalPlan, toolExecution, cleaned.answerSource),
+                usedTool = toolExecution != null,
+                visual = visualForPlan(context, finalPlan, toolExecution?.result),
+                decision = finalPlan.toDecision(toolExecution, cleaned.answerSource),
             )
         }.getOrElse { error ->
             AgentResponse(
-                text = "Qwen is unavailable: ${error.safeMessage()}",
-                statusLine = "model unavailable",
-                usedTool = summarizedToolResult != null,
+                text = fallbackAnswer(context, finalPlan),
+                statusLine = "classified as ${finalPlan.route.wireName} - local fallback",
+                usedTool = toolExecution != null,
+                visual = visualForPlan(context, finalPlan, toolExecution?.result),
+                decision = finalPlan.toDecision(toolExecution, "local_fallback:${error.safeMessage()}"),
             )
         }
-    }
-
-    private suspend fun buildNextStepAnswer(
-        context: HealthAgentContext,
-        userMessage: String,
-    ): AgentResponse {
-        val searchResult = runCatching {
-            toolBridgeClient.webSearch(nextStepSearchQuery(context, userMessage))
-        }.getOrNull()
-
-        val base = if (context.hasRecordedBiometrics) {
-            "${context.organ.displayName} is ${if (context.organ.statusGood) "currently marked stable" else "currently marked as needing attention"} in HALO. ${context.organ.sentenceNextStep}"
-        } else {
-            "Recorded biometrics are not available yet, so I can’t personalize a ${context.organ.displayName.lowercase()} improvement plan from watch data. For the MVP demo, the visible ${context.organ.displayName.lowercase()} card suggests: ${context.organ.sentenceNextStep}"
-        }
-
-        val webLine = searchResult
-            ?.let { summarizeWebContext(it.content).displayText }
-            ?: "Web search is not connected right now, so this answer is using HALO’s local backend context only."
-
-        return AgentResponse(
-            text = "$base $webLine",
-            statusLine = searchResult?.let { "golden next step + ${it.tool}" }
-                ?: "golden next step; web unavailable",
-            usedTool = searchResult != null,
-            visual = context.toAgentVisual(
-                if (searchResult != null) "Web-backed action graph" else "Local action graph"
-            ),
-        )
     }
 
     private fun HealthAgentContext.toAgentVisual(title: String): AgentVisual =
@@ -139,52 +112,109 @@ class OnDeviceLlmService(
             caption = "${organ.displayName} · ${organ.systemLabel}",
         )
 
-    private fun buildGreetingAnswer(context: HealthAgentContext): String =
-        "Hi — I’m here with your ${context.organ.displayName.lowercase()} view. Ask for status, what changed, or what to do next."
+    private suspend fun requestPlan(
+        context: HealthAgentContext,
+        userMessage: String,
+    ): AgentPlan {
+        val prompt = HealthAgentPromptBuilder.buildPlanPrompt(
+            context = context,
+            userMessage = userMessage,
+        )
+        return runCatching {
+            val raw = generator.generate(
+                prompt = prompt,
+                sequenceLength = PLAN_SEQUENCE_LENGTH,
+                visibleCharLimit = PLAN_VISIBLE_CHAR_LIMIT,
+            )
+            parseAgentPlan(raw, context, userMessage)
+        }.getOrElse {
+            fallbackPlanFromMessage(context, userMessage)
+        }
+    }
 
-    private fun buildHealthStatusAnswer(context: HealthAgentContext): String {
-        val status = if (context.organ.statusGood) "looks stable" else "needs attention"
-        val reasons = context.organ.metrics
-            .take(2)
-            .joinToString("; ") { metric ->
-                "${metric.label} ${metric.value}${metric.deltaText.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()}"
+    private suspend fun executeApprovedTool(plan: AgentPlan): ToolExecution? {
+        val request = validateToolRequest(plan) ?: return null
+        val result = runCatching {
+            when (request.tool) {
+                "web_search" -> toolClient.webSearch(request.query)
+                else -> null
             }
-            .ifBlank { context.organ.previewSummary }
-
-        return if (context.hasRecordedBiometrics) {
-            "Your current ${context.organ.displayName.lowercase()} status $status based on recorded HALO signals. The main signals are $reasons."
-        } else {
-            "Recorded biometrics are not available yet, so I can’t claim your personal ${context.organ.displayName.lowercase()} status from watch data. For the MVP demo, the ${context.organ.displayName.lowercase()} card $status because it shows $reasons."
         }
+        return result.fold(
+            onSuccess = { toolResult ->
+                val summarized = toolResult?.copy(content = summarizeWebContext(toolResult.content).promptText)
+                ToolExecution(
+                    plan = plan,
+                    result = summarized,
+                    errorMessage = if (summarized == null) "Tool returned no result" else null,
+                )
+            },
+            onFailure = { error ->
+                ToolExecution(
+                    plan = plan,
+                    result = null,
+                    errorMessage = error.safeMessage().take(MAX_TOOL_ERROR_CHARS),
+                )
+            },
+        )
     }
 
-    private fun buildLocalInfoAnswer(context: HealthAgentContext): String {
-        val sourceLine = if (context.hasRecordedBiometrics) {
-            "I’m reading recorded HALO biometrics and clinical context for this ${context.organ.displayName.lowercase()} view."
-        } else {
-            "Recorded biometrics are not available yet, so this view is using the local HALO demo card and backend component metadata."
-        }
-        return "$sourceLine I can explain the visible trend graph, summarize status, suggest next steps, or use web search only when you explicitly ask me to search."
-    }
-
-    private fun shouldUseWebSearch(message: String): Boolean {
-        val features = SemanticFeatures.from(message)
-        val explicitSearchScore =
-            features.score(WEB_SEARCH_TERMS, 3) +
-                features.score(WEB_SEARCH_PHRASES, 4) +
-                features.score(EVIDENCE_TERMS, 2)
-        return explicitSearchScore >= 3
-    }
-
-    private fun searchQuery(message: String): String =
-        message
-            .replace(Regex("(?i)\\b(search|web search|look up|google|find)\\b"), " ")
+    private fun validateToolRequest(plan: AgentPlan): ToolRequest? {
+        if (plan.type != AgentPlanType.ToolRequest) return null
+        if (plan.tool != "web_search") return null
+        val query = plan.query.orEmpty()
             .replace(Regex("\\s+"), " ")
             .trim()
-            .ifBlank { message }
+            .take(MAX_TOOL_QUERY_CHARS)
+        if (query.length < MIN_TOOL_QUERY_CHARS) return null
+        if (!query.any { it.isLetter() }) return null
+        return ToolRequest(tool = "web_search", query = query)
+    }
 
-    private fun nextStepSearchQuery(context: HealthAgentContext, userMessage: String): String =
-        "${context.organ.displayName} health evidence based next steps ${userMessage.ifBlank { context.organ.sentenceNextStep }}"
+    private fun visualForPlan(
+        context: HealthAgentContext,
+        plan: AgentPlan,
+        toolResult: ToolCallResult?,
+    ): AgentVisual? {
+        if (toolResult != null) return context.toAgentVisual("Agent-requested graph")
+        return when (plan.route) {
+            AgentRoute.HealthStatus -> context.toAgentVisual("Current signal graph")
+            AgentRoute.NextStep -> context.toAgentVisual("Action context graph")
+            AgentRoute.LocalContext, AgentRoute.GeneralHealth -> context.toAgentVisual("Referenced signal graph")
+            AgentRoute.WebResearch -> context.toAgentVisual("Research context graph")
+            AgentRoute.Smalltalk, AgentRoute.Clarify -> null
+        }
+    }
+
+    private fun statusLineFor(
+        plan: AgentPlan,
+        toolExecution: ToolExecution?,
+        answerSource: String,
+    ): String {
+        val action = when {
+            toolExecution?.result != null -> "web_search"
+            toolExecution?.errorMessage != null -> "web_search failed"
+            plan.needsHealthContext -> "health_context"
+            plan.route == AgentRoute.Clarify -> "clarify"
+            else -> "local"
+        }
+        val source = if (answerSource.startsWith("local_fallback")) "local fallback" else "Qwen final"
+        return "classified ${plan.route.wireName} - $action - $source"
+    }
+
+    private fun finalSequenceLengthFor(plan: AgentPlan): Int =
+        when (plan.route) {
+            AgentRoute.Smalltalk, AgentRoute.Clarify -> 160
+            AgentRoute.HealthStatus, AgentRoute.LocalContext -> 384
+            else -> 512
+        }
+
+    private fun finalVisibleCharLimitFor(plan: AgentPlan): Int =
+        when (plan.route) {
+            AgentRoute.Smalltalk, AgentRoute.Clarify -> 90
+            AgentRoute.HealthStatus, AgentRoute.LocalContext -> 260
+            else -> 360
+        }
 
     private fun summarizeWebContext(content: String): WebContextSummary {
         val sources = content
@@ -257,45 +287,16 @@ class OnDeviceLlmService(
             "ad_provider=" in lower
     }
 
-    private fun classifyIntent(context: HealthAgentContext, message: String): SemanticIntent? {
-        val features = SemanticFeatures.from(message)
-        if (features.normalized.isBlank()) return null
+    private fun parseAgentPlan(
+        raw: String,
+        context: HealthAgentContext,
+        userMessage: String,
+    ): AgentPlan = AgentPlanner.canonicalize(raw, context, userMessage)
 
-        val scores = EnumMap<GoldenFlow, Int>(GoldenFlow::class.java).apply {
-            GoldenFlow.entries.forEach { put(it, 0) }
-        }
-        fun add(flow: GoldenFlow, points: Int) {
-            scores[flow] = (scores[flow] ?: 0) + points
-        }
-
-        val mentionsOrgan = features.hasAny(context.organ.id, context.organ.displayName.lowercase())
-        val shortUtterance = features.tokens.size <= 4
-
-        add(GoldenFlow.Greeting, features.score(GREETING_TERMS, if (shortUtterance) 5 else 2))
-        add(GoldenFlow.Greeting, features.score(GREETING_PHRASES, 5))
-
-        add(GoldenFlow.HealthStatus, features.score(HEALTH_TERMS, 2))
-        add(GoldenFlow.HealthStatus, features.score(STATUS_TERMS, 2))
-        add(GoldenFlow.HealthStatus, features.score(STATUS_PHRASES, 4))
-        if (mentionsOrgan && features.hasAny(STATUS_TERMS)) add(GoldenFlow.HealthStatus, 3)
-        if (features.hasAny(QUESTION_TERMS) && features.hasAny(HEALTH_TERMS)) add(GoldenFlow.HealthStatus, 2)
-
-        add(GoldenFlow.NextStep, features.score(ACTION_TERMS, 2))
-        add(GoldenFlow.NextStep, features.score(IMPROVEMENT_TERMS, 3))
-        add(GoldenFlow.NextStep, features.score(ACTION_PHRASES, 5))
-        if (features.hasAny(QUESTION_TERMS) && features.hasAny(ACTION_TERMS)) add(GoldenFlow.NextStep, 2)
-
-        add(GoldenFlow.LocalInfo, features.score(EXPLAIN_TERMS, 2))
-        add(GoldenFlow.LocalInfo, features.score(GRAPH_TERMS, 3))
-        add(GoldenFlow.LocalInfo, features.score(LOCAL_INFO_PHRASES, 4))
-        if (features.hasAny(QUESTION_TERMS) && (features.hasAny(EXPLAIN_TERMS) || features.hasAny(GRAPH_TERMS))) {
-            add(GoldenFlow.LocalInfo, 2)
-        }
-
-        val best = scores.maxBy { it.value }
-        val threshold = if (best.key == GoldenFlow.Greeting) 5 else 4
-        return if (best.value >= threshold) SemanticIntent(best.key, best.value) else null
-    }
+    private fun fallbackPlanFromMessage(
+        context: HealthAgentContext,
+        userMessage: String,
+    ): AgentPlan = AgentPlanner.fallbackPlan(context, userMessage)
 
     private fun Throwable.safeMessage(): String =
         when (this) {
@@ -303,15 +304,33 @@ class OnDeviceLlmService(
             else -> message ?: javaClass.simpleName
         }
 
-    private fun cleanModelText(raw: String, context: HealthAgentContext): String {
+    private fun cleanModelText(
+        raw: String,
+        context: HealthAgentContext,
+        plan: AgentPlan,
+    ): CleanedAnswer {
         val normalized = extractVisibleAnswer(raw)
             .replace("```", " ")
             .replace(Regex("\\s+"), " ")
             .trim()
-        if (looksLikePromptLeak(normalized)) return fallbackAnswer(context)
-        if (violatesMissingDataPolicy(normalized, context)) return fallbackAnswer(context)
+            .stripRepeatedRoutingTail()
+        val fallback = fallbackAnswer(context, plan)
+        if (looksLikePromptLeak(normalized)) return CleanedAnswer(fallback, "local_fallback:prompt_leak")
+        if (plan.needsHealthContext && violatesMissingDataPolicy(normalized, context)) {
+            Log.d("HALO_LLM", "missing_data_policy raw=${raw.take(500)} normalized=${normalized.take(500)}")
+            return CleanedAnswer(fallback, "local_fallback:missing_data_policy")
+        }
+        if (plan.needsHealthContext && shouldRequireDisplaySignal(normalized, context, plan)) {
+            return CleanedAnswer(fallback, "local_fallback:missing_display_signal")
+        }
+        if (!plan.needsHealthContext && mentionsUnavailableHealthData(normalized)) {
+            return CleanedAnswer(fallback, "local_fallback:route_context_mismatch")
+        }
+        if (plan.route == AgentRoute.Smalltalk && looksLikeMedicalBoilerplate(normalized)) {
+            return CleanedAnswer(fallback, "local_fallback:smalltalk_boilerplate")
+        }
         if (normalized.isBlank()) {
-            return fallbackAnswer(context)
+            return CleanedAnswer(fallback, "local_fallback:blank")
         }
 
         val sentences = Regex("(?<=[.!?])\\s+")
@@ -322,20 +341,17 @@ class OnDeviceLlmService(
             .joinToString(" ")
             .ifBlank { normalized }
 
-        if (concise.length <= MAX_RESPONSE_CHARS) return concise
+        if (concise.length <= MAX_RESPONSE_CHARS) return CleanedAnswer(concise, "qwen_final")
         val clipped = concise.take(MAX_RESPONSE_CHARS)
         val lastSpace = clipped.lastIndexOf(' ')
-        return clipped.take(if (lastSpace > 120) lastSpace else clipped.length).trimEnd() + "..."
+        return CleanedAnswer(
+            text = clipped.take(if (lastSpace > 120) lastSpace else clipped.length).trimEnd() + "...",
+            answerSource = "qwen_final",
+        )
     }
 
     private fun extractVisibleAnswer(text: String): String {
-        val afterAssistant = text.substringAfterLast("<|im_start|>assistant", text)
-        val afterLegacyMarker = afterAssistant.substringAfterLast("HALO_RESPONSE:", afterAssistant)
-        return afterLegacyMarker
-            .replace(Regex("(?is)<think>.*?</think>"), " ")
-            .replace(Regex("(?is)<think>.*$"), " ")
-            .replace("<|im_end|>", " ")
-            .replace("<|endoftext|>", " ")
+        return extractVisibleAnswerText(text)
     }
 
     private fun looksLikePromptLeak(text: String): Boolean {
@@ -347,7 +363,8 @@ class OnDeviceLlmService(
         if (context.hasRecordedBiometrics) return false
         val normalized = text.lowercase()
         val statesMissingData = MISSING_DATA_PHRASES.any { it in normalized }
-        return !statesMissingData
+        val framesAsDisplayContext = DISPLAY_CONTEXT_PHRASES.any { it in normalized }
+        return !statesMissingData && !framesAsDisplayContext
     }
 
     private fun collapseConsecutiveRepeats(text: String): String {
@@ -368,126 +385,89 @@ class OnDeviceLlmService(
         return collapsed.joinToString(" ")
     }
 
-    private fun fallbackAnswer(context: HealthAgentContext): String =
-        if (!context.hasRecordedBiometrics) {
-            "Recorded biometrics are not available yet, so I cannot infer personal ${context.organ.displayName.lowercase()} risk from watch data. Once heart rate, HRV, sleep, steps, or clinical records are recorded, I can compare them against your backend signals."
-        } else {
-            "I thought through the available HALO context, but the on-device model did not produce a clean final answer. The backend signals should be reviewed directly for now."
+    private fun String.stripRepeatedRoutingTail(): String =
+        replace(Regex("(?:\\s+\\b[ABCD]\\b){3,}\\s*$"), "")
+            .trim()
+
+    private fun mentionsUnavailableHealthData(text: String): Boolean {
+        val normalized = text.lowercase()
+        return MISSING_DATA_PHRASES.any { it in normalized } &&
+            HEALTH_CONTEXT_OUTPUT_TERMS.any { it in normalized }
+    }
+
+    private fun looksLikeMedicalBoilerplate(text: String): Boolean {
+        val normalized = text.lowercase()
+        return MEDICAL_BOILERPLATE_PHRASES.any { it in normalized }
+    }
+
+    private fun shouldRequireDisplaySignal(
+        text: String,
+        context: HealthAgentContext,
+        plan: AgentPlan,
+    ): Boolean {
+        if (context.hasRecordedBiometrics) return false
+        if (context.organ.metrics.isEmpty()) return false
+        if (plan.route == AgentRoute.Clarify || plan.route == AgentRoute.Smalltalk) return false
+        return !mentionsDisplaySignal(text, context)
+    }
+
+    private fun mentionsDisplaySignal(
+        text: String,
+        context: HealthAgentContext,
+    ): Boolean {
+        val normalized = text.lowercase()
+        return context.organ.metrics.any { metric ->
+            metric.label.lowercase() in normalized ||
+                metric.value.lowercase() in normalized ||
+                metric.deltaText.takeIf { it.isNotBlank() }?.lowercase()?.let { it in normalized } == true
+        }
+    }
+
+    private fun displayMetricSummary(context: HealthAgentContext): String =
+        context.organ.metrics
+            .take(3)
+            .joinToString(" and ") { metric ->
+                val delta = metric.deltaText.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+                "${metric.label} ${metric.value}$delta"
+            }
+            .ifBlank { context.organ.previewSummary }
+
+    private fun displayCardStatus(context: HealthAgentContext): String =
+        if (context.organ.statusGood) "stable" else "needs attention"
+
+    private fun displayContextQualifier(): String =
+        "This is HALO card context, not a live watch-recorded medical conclusion."
+
+    private fun fallbackAnswer(
+        context: HealthAgentContext,
+        plan: AgentPlan,
+    ): String =
+        when (plan.route) {
+            AgentRoute.Smalltalk ->
+                "Hi - I am here with HALO. Ask about your status, this graph, or what to do next."
+
+            AgentRoute.Clarify ->
+                "I am not sure what you meant. Ask about your current status, this graph, or a next step."
+
+            AgentRoute.WebResearch ->
+                "I could not turn the sourced context into a clean answer. Try the search again or ask for a local HALO summary."
+
+            AgentRoute.NextStep ->
+                if (!context.hasRecordedBiometrics) {
+                    "HALO suggests this next step for your ${context.organ.displayName.lowercase()} card: ${context.organ.sentenceNextStep} ${displayContextQualifier()}"
+                } else {
+                    "${context.organ.previewSummary} Next step: ${context.organ.sentenceNextStep}"
+                }
+
+            AgentRoute.HealthStatus, AgentRoute.LocalContext, AgentRoute.GeneralHealth ->
+                if (!context.hasRecordedBiometrics) {
+                    "HALO currently marks your ${context.organ.displayName.lowercase()} card as ${displayCardStatus(context)}. The visible signals are ${displayMetricSummary(context)}. ${displayContextQualifier()}"
+                } else {
+                    "${context.organ.previewSummary} ${context.organ.sentenceWeek} ${context.organ.sentenceNextStep}"
+                }
         }
 
     companion object {
-        private val GREETING_TERMS = setOf("hi", "hello", "hey", "yo", "sup", "howdy")
-        private val GREETING_PHRASES = setOf(
-            "good morning",
-            "good afternoon",
-            "good evening",
-            "what s up",
-            "whats up",
-        )
-
-        private val HEALTH_TERMS = setOf(
-            "health",
-            "biometrics",
-            "vitals",
-            "heart",
-            "kidney",
-            "sleep",
-            "lungs",
-            "liver",
-            "gut",
-            "brain",
-            "body",
-            "recovery",
-            "readiness",
-        )
-        private val STATUS_TERMS = setOf(
-            "status",
-            "state",
-            "condition",
-            "doing",
-            "good",
-            "bad",
-            "healthy",
-            "stable",
-            "risk",
-            "safe",
-            "today",
-            "current",
-            "now",
-        )
-        private val STATUS_PHRASES = setOf(
-            "how am i",
-            "how am i doing",
-            "am i good",
-            "am i bad",
-            "good or bad",
-            "current health",
-            "health status",
-            "my status",
-        )
-
-        private val ACTION_TERMS = setOf(
-            "do",
-            "change",
-            "try",
-            "plan",
-            "next",
-            "step",
-            "recommend",
-            "recommendation",
-            "advice",
-            "help",
-            "action",
-            "actions",
-        )
-        private val IMPROVEMENT_TERMS = setOf(
-            "improve",
-            "improving",
-            "better",
-            "optimize",
-            "recover",
-            "recovery",
-            "lower",
-            "raise",
-            "reduce",
-            "increase",
-        )
-        private val ACTION_PHRASES = setOf(
-            "what should i do",
-            "what do i do",
-            "what can i do",
-            "next step",
-            "next steps",
-            "what can you do",
-        )
-
-        private val EXPLAIN_TERMS = setOf(
-            "explain",
-            "mean",
-            "meaning",
-            "why",
-            "because",
-            "interpret",
-            "summarize",
-            "summary",
-            "tell",
-            "seeing",
-        )
-        private val GRAPH_TERMS = setOf("graph", "chart", "trend", "line", "bars", "metric", "metrics", "signal", "signals")
-        private val LOCAL_INFO_PHRASES = setOf(
-            "what is going on",
-            "whats going on",
-            "what am i looking at",
-            "what does this mean",
-            "tell me more",
-            "what can you tell me",
-            "what are you seeing",
-        )
-
-        private val WEB_SEARCH_TERMS = setOf("search", "google", "web", "online")
-        private val WEB_SEARCH_PHRASES = setOf("search the web", "web search", "look up", "google it")
-        private val EVIDENCE_TERMS = setOf("research", "study", "studies", "source", "sources", "guideline", "guidelines", "latest", "recent", "published")
-        private val QUESTION_TERMS = setOf("what", "how", "why", "is", "are", "am", "should", "can", "could")
         private val PROMPT_LEAK_MARKERS = listOf(
             "health_context_json",
             "user_message",
@@ -504,28 +484,83 @@ class OnDeviceLlmService(
             "don't have",
             "cannot infer",
             "can't infer",
-            "missing",
             "unavailable",
+        )
+        private val HEALTH_CONTEXT_OUTPUT_TERMS = listOf(
+            "biometrics",
+            "watch data",
+            "risk",
+            "heart rate",
+            "hrv",
+            "sleep",
+            "steps",
+            "recorded",
+            "demo",
+        )
+        private val DISPLAY_CONTEXT_PHRASES = listOf(
+            "visible",
+            "display context",
+            "display-only",
+            "halo card",
+            "card context",
+            "shown",
+            "dashboard",
+        )
+        private val MEDICAL_BOILERPLATE_PHRASES = listOf(
+            "medical advice",
+            "medical diagnosis",
+            "diagnosis",
+            "consult a healthcare professional",
+            "healthcare professional",
+            "safety and privacy",
+            "missing data or demo values",
         )
         private val WEB_RESULT_PATTERN = Regex("^Result:\\s*(.*?)\\s*\\((https?://[^\\s)]+).*\\)\\s*$")
         private val URL_PATTERN = Regex("https?://\\S+")
+        private val THINK_CLOSE_PATTERN = Regex("(?is)</think>")
         private const val MAX_TOOL_SUMMARY_CHARS = 360
+        private const val MAX_TOOL_ERROR_CHARS = 180
         private const val MAX_RESPONSE_SENTENCES = 4
         private const val MAX_RESPONSE_CHARS = 560
+        private const val PLAN_SEQUENCE_LENGTH = 192
+        private const val PLAN_VISIBLE_CHAR_LIMIT = 24
+        private const val MAX_TOOL_QUERY_CHARS = 160
+        private const val MIN_TOOL_QUERY_CHARS = 4
+        internal fun extractVisibleAnswerForTesting(text: String): String =
+            extractVisibleAnswerText(text)
+
+        internal fun canonicalPlanForTesting(
+            raw: String,
+            context: HealthAgentContext,
+            userMessage: String,
+        ): AgentPlan = AgentPlanner.canonicalize(raw, context, userMessage)
+
+        private fun extractVisibleAnswerText(text: String): String {
+            val afterAssistant = text.substringAfterLast("<|im_start|>assistant", text)
+            val afterLegacyMarker = afterAssistant.substringAfterLast("HALO_RESPONSE:", afterAssistant)
+            val withoutClosedThinking = afterLegacyMarker.replace(Regex("(?is)<think>.*?</think>"), " ")
+            val withoutOrphanThinking = THINK_CLOSE_PATTERN.findAll(withoutClosedThinking)
+                .lastOrNull()
+                ?.let { withoutClosedThinking.substring(it.range.last + 1) }
+                ?: withoutClosedThinking
+            return withoutOrphanThinking
+                .replace(Regex("(?is)<think>.*$"), " ")
+                .replace(Regex("(?is)</?think>"), " ")
+                .replace("<|im_end|>", " ")
+                .replace("<|endoftext|>", " ")
+        }
     }
 }
 
-private enum class GoldenFlow {
-    Greeting,
-    HealthStatus,
-    NextStep,
-    LocalInfo,
-}
-
-private data class SemanticIntent(
-    val flow: GoldenFlow,
-    val score: Int,
+private data class CleanedAnswer(
+    val text: String,
+    val answerSource: String,
 )
+
+internal enum class AgentPlanType {
+    Final,
+    ToolRequest,
+}
 
 private data class WebSource(
     val title: String,
@@ -537,7 +572,580 @@ private data class WebContextSummary(
     val promptText: String,
 )
 
-private data class SemanticFeatures(
+internal enum class AgentRoute(
+    val wireName: String,
+    val defaultNeedsHealthContext: Boolean,
+) {
+    Smalltalk("smalltalk", false),
+    Clarify("clarify", false),
+    LocalContext("local_context", true),
+    HealthStatus("health_status", true),
+    NextStep("next_step", true),
+    GeneralHealth("general_health", true),
+    WebResearch("web_research", false);
+
+    companion object {
+        fun fromWireName(value: String): AgentRoute =
+            entries.firstOrNull { it.wireName == value.lowercase() } ?: GeneralHealth
+    }
+}
+
+internal data class AgentPlan(
+    val type: AgentPlanType,
+    val route: AgentRoute,
+    val needsHealthContext: Boolean = route.defaultNeedsHealthContext,
+    val tool: String? = null,
+    val query: String? = null,
+    val reason: String? = null,
+)
+
+internal object AgentPlanner {
+    fun localPlanForGoldenFlow(
+        context: HealthAgentContext,
+        userMessage: String,
+    ): AgentPlan? {
+        val policy = IntentPolicy.from(context, userMessage)
+        if (policy.allowWeb) return null
+        return AgentPlan(
+            type = AgentPlanType.Final,
+            route = policy.route,
+            needsHealthContext = policy.needsHealthContext,
+            reason = "local_semantic_pre_route",
+        )
+    }
+
+    fun canonicalize(
+        raw: String,
+        context: HealthAgentContext,
+        userMessage: String,
+    ): AgentPlan {
+        val policy = IntentPolicy.from(context, userMessage)
+        val candidateJson = listOfNotNull(labelCandidate(raw)) + extractJsonObjects(raw)
+        val candidates = candidateJson.mapNotNull { parseCandidate(it) }
+        val selected = selectCandidate(candidates, policy)
+        return selected?.toPlan(policy) ?: fallbackPlan(context, userMessage)
+    }
+
+    fun firstRoutingLabel(raw: String): Char? {
+        val visible = OnDeviceLlmService.extractVisibleAnswerForTesting(raw)
+            .replace("<|im_end|>", " ")
+            .replace("<|endoftext|>", " ")
+            .replace(Regex("(?is)</?think>"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        val text = visible.ifBlank {
+            raw.replace("<|im_end|>", " ")
+                .replace("<|endoftext|>", " ")
+                .replace(Regex("(?is)</?think>"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }
+        return LABEL_PATTERN.find(text.take(80))
+            ?.value
+            ?.firstOrNull()
+    }
+
+    fun fallbackPlan(
+        context: HealthAgentContext,
+        userMessage: String,
+    ): AgentPlan {
+        val policy = IntentPolicy.from(context, userMessage)
+        return when {
+            policy.allowWeb -> AgentPlan(
+                type = AgentPlanType.ToolRequest,
+                route = AgentRoute.WebResearch,
+                needsHealthContext = false,
+                tool = "web_search",
+                query = policy.query,
+            )
+
+            policy.preferNoAction -> AgentPlan(
+                type = AgentPlanType.Final,
+                route = policy.route,
+                needsHealthContext = false,
+            )
+
+            policy.preferClarify -> AgentPlan(
+                type = AgentPlanType.Final,
+                route = AgentRoute.Clarify,
+                needsHealthContext = false,
+            )
+
+            else -> AgentPlan(
+                type = AgentPlanType.Final,
+                route = policy.route,
+                needsHealthContext = policy.needsHealthContext,
+            )
+        }
+    }
+
+    fun toPredictionJson(plan: AgentPlan): JSONObject =
+        JSONObject()
+            .put("type", if (plan.type == AgentPlanType.ToolRequest) "tool_request" else "final")
+            .put("tool", plan.tool.orEmpty())
+            .put("route", plan.route.wireName)
+            .put("query", plan.query.orEmpty())
+            .put("needs_health_context", plan.needsHealthContext)
+            .put("reason", plan.reason.orEmpty())
+
+    private fun selectCandidate(
+        candidates: List<PlannerCandidate>,
+        policy: IntentPolicy,
+    ): PlannerCandidate? {
+        if (policy.preferNoAction) {
+            return candidates
+                .filter { it.action != PlannerAction.WebSearch }
+                .maxByOrNull { it.score + if (it.action == PlannerAction.NoAction) 40 else 0 }
+                ?.copy(action = PlannerAction.NoAction, route = policy.route, needsHealthContext = false)
+                ?: PlannerCandidate(
+                    action = PlannerAction.NoAction,
+                    route = policy.route,
+                    needsHealthContext = false,
+                    tool = null,
+                    query = null,
+                    reason = null,
+                    score = 40,
+                )
+        }
+
+        if (policy.preferClarify) {
+            return candidates
+                .filter { it.action != PlannerAction.WebSearch }
+                .maxByOrNull { it.score + if (it.action == PlannerAction.Clarify) 40 else 0 }
+                ?.copy(action = PlannerAction.Clarify, route = AgentRoute.Clarify, needsHealthContext = false)
+                ?: PlannerCandidate(
+                    action = PlannerAction.Clarify,
+                    route = AgentRoute.Clarify,
+                    needsHealthContext = false,
+                    tool = null,
+                    query = null,
+                    reason = null,
+                    score = 40,
+                )
+        }
+
+        if (!policy.allowWeb) {
+            val nonWeb = candidates
+                .filter { it.action != PlannerAction.WebSearch }
+                .maxByOrNull { it.score }
+                ?: return PlannerCandidate(
+                    action = PlannerAction.DataRecall,
+                    route = policy.route,
+                    needsHealthContext = policy.needsHealthContext,
+                    tool = null,
+                    query = null,
+                    reason = null,
+                    score = 20,
+                )
+            return if (policy.needsHealthContext) {
+                nonWeb.copy(
+                    action = PlannerAction.DataRecall,
+                    route = policy.route,
+                    needsHealthContext = true,
+                )
+            } else {
+                nonWeb.copy(
+                    action = if (nonWeb.action == PlannerAction.Clarify) PlannerAction.Clarify else PlannerAction.NoAction,
+                    route = policy.route,
+                    needsHealthContext = false,
+                )
+            }
+        }
+
+        val webCandidate = candidates
+            .filter { it.action == PlannerAction.WebSearch || it.hasWebSignal }
+            .maxByOrNull { it.score + 40 }
+        if (webCandidate != null) {
+            return webCandidate.copy(
+                action = PlannerAction.WebSearch,
+                route = AgentRoute.WebResearch,
+                needsHealthContext = false,
+                tool = "web_search",
+                query = webCandidate.query?.takeIf { it.isNotBlank() } ?: policy.query,
+            )
+        }
+
+        return PlannerCandidate(
+            action = PlannerAction.WebSearch,
+            route = AgentRoute.WebResearch,
+            needsHealthContext = false,
+            tool = "web_search",
+            query = policy.query,
+            reason = null,
+            hasWebSignal = true,
+            score = 20,
+        )
+    }
+
+    private fun fallbackCandidate(policy: IntentPolicy): PlannerCandidate =
+        PlannerCandidate(
+            action = if (policy.needsHealthContext) PlannerAction.DataRecall else PlannerAction.NoAction,
+            route = policy.route,
+            needsHealthContext = policy.needsHealthContext,
+            tool = null,
+            query = null,
+            reason = null,
+            score = 10,
+        )
+
+    private fun PlannerCandidate.toPlan(policy: IntentPolicy): AgentPlan =
+        when (action) {
+            PlannerAction.WebSearch -> AgentPlan(
+                type = AgentPlanType.ToolRequest,
+                route = AgentRoute.WebResearch,
+                needsHealthContext = false,
+                tool = "web_search",
+                query = query?.takeIf { it.isNotBlank() } ?: policy.query,
+                reason = reason,
+            )
+
+            PlannerAction.NoAction -> AgentPlan(
+                type = AgentPlanType.Final,
+                route = route,
+                needsHealthContext = false,
+                reason = reason,
+            )
+
+            PlannerAction.Clarify -> AgentPlan(
+                type = AgentPlanType.Final,
+                route = AgentRoute.Clarify,
+                needsHealthContext = false,
+                reason = reason,
+            )
+
+            PlannerAction.DataRecall -> AgentPlan(
+                type = AgentPlanType.Final,
+                route = route,
+                needsHealthContext = needsHealthContext ?: route.defaultNeedsHealthContext,
+                reason = reason,
+            )
+        }
+
+    private fun parseCandidate(jsonText: String): PlannerCandidate? {
+        val obj = runCatching { JSONObject(jsonText) }.getOrNull() ?: return null
+        val actionToken = canonicalToken(obj.optString("action"))
+        val typeToken = canonicalToken(obj.optString("type"))
+        val toolToken = canonicalToken(obj.optString("tool"))
+        val routeToken = canonicalToken(obj.optString("route"))
+        val reason = obj.optString("reason").takeIf { it.isNotBlank() }
+        val query = obj.optString("query").replace(Regex("\\s+"), " ").trim()
+            .takeIf { it.isNotBlank() }
+
+        val hasWebSignal = "web_search" in actionToken ||
+            typeToken == "tool_request" ||
+            "web_search" in toolToken ||
+            routeToken in WEB_ROUTE_TOKENS ||
+            WEB_REASON_TERMS.any { it in canonicalToken(reason.orEmpty()) }
+
+        val action = when {
+            hasWebSignal -> PlannerAction.WebSearch
+            actionToken in NO_ACTION_TOKENS || routeToken in NO_ACTION_ROUTE_TOKENS -> PlannerAction.NoAction
+            actionToken == "clarify" || routeToken == "clarify" -> PlannerAction.Clarify
+            else -> PlannerAction.DataRecall
+        }
+        val route = routeFromToken(routeToken, action)
+        val needsHealthContext = when {
+            obj.has("needs_health_context") -> obj.optBoolean("needs_health_context", route.defaultNeedsHealthContext)
+            action == PlannerAction.WebSearch || action == PlannerAction.NoAction || action == PlannerAction.Clarify -> false
+            else -> route.defaultNeedsHealthContext
+        }
+        val score = listOf(actionToken, typeToken, toolToken, routeToken)
+            .count { it.isNotBlank() } * 8 +
+            if (query != null) 10 else 0 +
+            if (reason != null) 5 else 0 +
+            if (hasWebSignal) 20 else 0
+
+        return PlannerCandidate(
+            action = action,
+            route = route,
+            needsHealthContext = needsHealthContext,
+            tool = toolToken.takeIf { it.isNotBlank() },
+            query = query,
+            reason = reason,
+            hasWebSignal = hasWebSignal,
+            score = score,
+        )
+    }
+
+    private fun labelCandidate(raw: String): String? =
+        when (firstRoutingLabel(raw)) {
+            'A' -> """{"action":"no_action","route":"smalltalk","needs_health_context":false,"query":""}"""
+            'B' -> """{"action":"data_recall","route":"local_context","needs_health_context":true,"query":""}"""
+            'C' -> """{"action":"web_search","route":"web_research","needs_health_context":false,"query":""}"""
+            'D' -> """{"action":"clarify","route":"clarify","needs_health_context":false,"query":""}"""
+            else -> null
+        }
+
+    private fun routeFromToken(
+        routeToken: String,
+        action: PlannerAction,
+    ): AgentRoute =
+        when {
+            action == PlannerAction.WebSearch -> AgentRoute.WebResearch
+            action == PlannerAction.Clarify -> AgentRoute.Clarify
+            routeToken == "smalltalk" -> AgentRoute.Smalltalk
+            routeToken == "clarify" -> AgentRoute.Clarify
+            routeToken == "local_context" -> AgentRoute.LocalContext
+            routeToken == "health_status" || routeToken.startsWith("health_") -> AgentRoute.HealthStatus
+            routeToken == "next_step" -> AgentRoute.NextStep
+            routeToken == "web_research" || routeToken == "web_search" -> AgentRoute.WebResearch
+            else -> AgentRoute.GeneralHealth
+        }
+
+    private fun extractJsonObjects(raw: String): List<String> {
+        val visible = OnDeviceLlmService.extractVisibleAnswerForTesting(raw)
+            .replace("```json", "")
+            .replace("```", "")
+        val objects = mutableListOf<String>()
+        var start = -1
+        var depth = 0
+        var inString = false
+        var escaped = false
+
+        visible.forEachIndexed { index, char ->
+            when {
+                escaped -> escaped = false
+                char == '\\' && inString -> escaped = true
+                char == '"' -> inString = !inString
+                !inString && char == '{' -> {
+                    if (depth == 0) start = index
+                    depth += 1
+                }
+                !inString && char == '}' && depth > 0 -> {
+                    depth -= 1
+                    if (depth == 0 && start >= 0) {
+                        objects += visible.substring(start, index + 1)
+                        start = -1
+                    }
+                }
+            }
+        }
+
+        return objects
+    }
+
+    private fun canonicalToken(value: String): String =
+        value.lowercase()
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .replace(Regex("_+"), "_")
+            .trim('_')
+
+    private enum class PlannerAction {
+        WebSearch,
+        DataRecall,
+        NoAction,
+        Clarify,
+    }
+
+    private data class PlannerCandidate(
+        val action: PlannerAction,
+        val route: AgentRoute,
+        val needsHealthContext: Boolean?,
+        val tool: String?,
+        val query: String?,
+        val reason: String?,
+        val hasWebSignal: Boolean = false,
+        val score: Int,
+    )
+
+    private data class IntentPolicy(
+        val allowWeb: Boolean,
+        val preferNoAction: Boolean,
+        val preferClarify: Boolean,
+        val route: AgentRoute,
+        val needsHealthContext: Boolean,
+        val query: String,
+    ) {
+        companion object {
+            fun from(
+                context: HealthAgentContext,
+                userMessage: String,
+            ): IntentPolicy {
+                val features = SemanticFeatures.from(userMessage)
+                val tokenCount = features.tokens.size
+                val explicitExternal = features.hasAny(EXTERNAL_TERMS)
+                val casual = features.hasAny(CASUAL_TERMS)
+                val mentionsOrgan = features.hasAny(context.organ.id, context.organ.displayName.lowercase())
+                val mentionsHealth = mentionsOrgan || features.hasAny(HEALTH_CONTEXT_TERMS)
+                val localReference = features.hasAny(LOCAL_REFERENCE_TERMS)
+                val nextStep = features.hasAny(NEXT_STEP_TERMS)
+                val graph = features.hasAny(GRAPH_TERMS)
+                val status = features.hasAny(STATUS_TERMS)
+                val preferNoAction = !explicitExternal && !mentionsHealth &&
+                    (casual || (!localReference && tokenCount <= 2 && userMessage.length <= 12))
+                val preferClarify = !preferNoAction && !explicitExternal && !mentionsHealth &&
+                    tokenCount <= 2 && userMessage.length <= 16
+                val route = when {
+                    preferNoAction -> AgentRoute.Smalltalk
+                    preferClarify -> AgentRoute.Clarify
+                    graph || (localReference && !status) -> AgentRoute.LocalContext
+                    nextStep -> AgentRoute.NextStep
+                    status || mentionsOrgan -> AgentRoute.HealthStatus
+                    mentionsHealth -> AgentRoute.GeneralHealth
+                    else -> AgentRoute.Smalltalk
+                }
+                return IntentPolicy(
+                    allowWeb = explicitExternal,
+                    preferNoAction = preferNoAction,
+                    preferClarify = preferClarify,
+                    route = route,
+                    needsHealthContext = route.defaultNeedsHealthContext,
+                    query = userMessage.replace(Regex("\\s+"), " ").trim().take(MAX_QUERY_CHARS),
+                )
+            }
+        }
+    }
+
+    private val EXTERNAL_TERMS = setOf(
+        "web",
+        "search",
+        "look up",
+        "lookup",
+        "internet",
+        "online",
+        "research",
+        "source",
+        "source backed",
+        "sources",
+        "citation",
+        "cited",
+        "evidence",
+        "study",
+        "studies",
+        "guideline",
+        "guidelines",
+        "latest",
+        "current guidance",
+        "recent",
+        "cdc",
+        "aha",
+        "peer reviewed",
+        "reliable medical",
+    )
+    private val HEALTH_CONTEXT_TERMS = setOf(
+        "health",
+        "biometrics",
+        "vitals",
+        "heart",
+        "kidney",
+        "sleep",
+        "lungs",
+        "liver",
+        "gut",
+        "brain",
+        "body",
+        "recovery",
+        "readiness",
+        "status",
+        "risk",
+        "steps",
+        "hrv",
+        "rhr",
+        "bpm",
+        "strain",
+        "hydration",
+        "blood pressure",
+        "glucose",
+    )
+    private val LOCAL_REFERENCE_TERMS = setOf(
+        "my",
+        "me",
+        "current",
+        "today",
+        "recorded",
+        "watch",
+        "dashboard",
+        "local",
+        "backend",
+        "baseline",
+        "changed",
+        "trend",
+        "graph",
+        "card",
+        "this",
+        "these",
+        "shown",
+        "showing",
+    )
+    private val NEXT_STEP_TERMS = setOf("next", "improve", "recommend", "should", "action", "plan")
+    private val GRAPH_TERMS = setOf("graph", "chart", "card", "looking at", "what does this mean", "red")
+    private val STATUS_TERMS = setOf(
+        "status",
+        "good",
+        "bad",
+        "risk",
+        "normal",
+        "worse",
+        "better",
+        "healthy",
+        "unhealthy",
+        "healthier",
+        "healthiest",
+    )
+    private val CASUAL_TERMS = setOf(
+        "hi",
+        "hello",
+        "hey",
+        "yo",
+        "sup",
+        "thanks",
+        "thank you",
+        "whats up",
+        "what is up",
+        "my dude",
+        "good morning",
+        "good evening",
+    )
+    private val WEB_ROUTE_TOKENS = setOf("web_research", "web_search", "search", "research")
+    private val WEB_REASON_TERMS = setOf("external", "source", "evidence", "latest", "current")
+    private val NO_ACTION_TOKENS = setOf("no_action", "smalltalk", "casual", "none")
+    private val NO_ACTION_ROUTE_TOKENS = setOf("smalltalk", "casual")
+    private val LABEL_PATTERN = Regex("(?<![A-Za-z])[ABCD](?![A-Za-z])")
+    private const val MAX_QUERY_CHARS = 160
+}
+
+private data class ToolRequest(
+    val tool: String,
+    val query: String,
+)
+
+private data class ToolExecution(
+    val plan: AgentPlan,
+    val result: ToolCallResult?,
+    val errorMessage: String?,
+) {
+    fun promptResult(): ToolCallResult? {
+        result?.let { return it }
+        val message = errorMessage?.takeIf { it.isNotBlank() } ?: return null
+        return ToolCallResult(
+            tool = plan.tool ?: "tool",
+            content = "Tool execution failed: $message",
+        )
+    }
+}
+
+private fun AgentPlan.toDecision(
+    toolExecution: ToolExecution?,
+    answerSource: String,
+): AgentDecision =
+    AgentDecision(
+        action = when {
+            toolExecution?.result != null -> "web_search"
+            toolExecution?.errorMessage != null -> "web_search_failed"
+            type == AgentPlanType.ToolRequest -> "web_search_requested"
+            route == AgentRoute.Clarify -> "clarify"
+            route == AgentRoute.Smalltalk -> "no_action"
+            needsHealthContext -> "data_recall"
+            else -> "no_action"
+        },
+        route = route.wireName,
+        needsHealthContext = needsHealthContext,
+        toolName = toolExecution?.result?.tool ?: toolExecution?.plan?.tool ?: tool,
+        query = query,
+        answerSource = answerSource,
+    )
+
+internal data class SemanticFeatures(
     val normalized: String,
     val tokens: Set<String>,
 ) {
@@ -583,18 +1191,27 @@ private data class SemanticFeatures(
     }
 }
 
+interface LocalTextGenerator {
+    suspend fun generate(
+        prompt: String,
+        sequenceLength: Int = 1024,
+        visibleCharLimit: Int = 420,
+        onToken: ((String) -> Unit)? = null,
+    ): String
+}
+
 class QwenLocalGenerator(
     private val context: Context,
     private val modelPath: String = QnnEnvironment.MODEL_PATH,
     private val tokenizerPath: String = QnnEnvironment.TOKENIZER_PATH,
-) {
+) : LocalTextGenerator {
     private val mutex = Mutex()
 
-    suspend fun generate(
+    override suspend fun generate(
         prompt: String,
-        sequenceLength: Int = DEFAULT_SEQUENCE_LENGTH,
-        visibleCharLimit: Int = DEFAULT_VISIBLE_CHAR_LIMIT,
-        onToken: ((String) -> Unit)? = null,
+        sequenceLength: Int,
+        visibleCharLimit: Int,
+        onToken: ((String) -> Unit)?,
     ): String =
         withContext(Dispatchers.IO) {
             mutex.withLock {
@@ -613,7 +1230,7 @@ class QwenLocalGenerator(
                             streamedText = visible
                             onToken.invoke(delta)
                         }
-                        if (shouldStopGeneration(output.length, visible, visibleCharLimit)) {
+                        if (shouldStopGeneration(output.toString(), visible, visibleCharLimit)) {
                             stoppedForLimit = true
                             activeModule.stop()
                         }
@@ -656,14 +1273,19 @@ class QwenLocalGenerator(
         val afterAssistant = raw.substringAfterLast("<|im_start|>assistant", raw)
         val afterLegacyMarker = afterAssistant.substringAfterLast("HALO_RESPONSE:", afterAssistant)
         val withoutClosedThinking = afterLegacyMarker.replace(Regex("(?is)<think>.*?</think>"), "")
-        val openThinkStart = withoutClosedThinking.indexOf("<think>", ignoreCase = true)
+        val withoutOrphanThinking = THINK_CLOSE_PATTERN.findAll(withoutClosedThinking)
+            .lastOrNull()
+            ?.let { withoutClosedThinking.substring(it.range.last + 1) }
+            ?: withoutClosedThinking
+        val openThinkStart = withoutOrphanThinking.indexOf("<think>", ignoreCase = true)
         val withoutOpenThinking = if (openThinkStart >= 0) {
-            withoutClosedThinking.take(openThinkStart)
+            withoutOrphanThinking.take(openThinkStart)
         } else {
-            withoutClosedThinking
+            withoutOrphanThinking
         }
         val visible = withoutOpenThinking
             .replace("```", "")
+            .replace(Regex("(?is)</?think>"), "")
             .replace("<|im_end|>", "")
             .replace("<|endoftext|>", "")
             .trimStart()
@@ -690,13 +1312,24 @@ class QwenLocalGenerator(
     }
 
     private fun shouldStopGeneration(
-        rawChars: Int,
+        raw: String,
         visible: String,
         visibleCharLimit: Int,
     ): Boolean {
-        if (rawChars >= MAX_RAW_GENERATED_CHARS) return true
+        if (visibleCharLimit <= LABEL_VISIBLE_CHAR_LIMIT && AgentPlanner.firstRoutingLabel(raw) != null) {
+            return true
+        }
+        if (raw.length >= MAX_RAW_GENERATED_CHARS) return true
+        if (looksLikeCompleteJson(visible)) return true
         if (visible.length < visibleCharLimit) return false
         return visible.lastOrNull() in FINAL_PUNCTUATION || visible.length >= HARD_VISIBLE_CHAR_LIMIT
+    }
+
+    private fun looksLikeCompleteJson(visible: String): Boolean {
+        val trimmed = visible.trim()
+        if (trimmed.length < 24) return false
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false
+        return "\"action\"" in trimmed || "\"type\"" in trimmed || "\"route\"" in trimmed
     }
 
     private fun compactPrompt(prompt: String): String {
@@ -733,6 +1366,7 @@ class QwenLocalGenerator(
         private const val DEFAULT_SEQUENCE_LENGTH = 1024
         private const val DEFAULT_VISIBLE_CHAR_LIMIT = 420
         private const val HARD_VISIBLE_CHAR_LIMIT = 620
+        private const val LABEL_VISIBLE_CHAR_LIMIT = 32
         private const val MAX_RAW_GENERATED_CHARS = 3200
         private const val MAX_PROMPT_CHARS = 1600
         private const val PROMPT_HEAD_CHARS = 950
@@ -747,5 +1381,6 @@ class QwenLocalGenerator(
             "\"organ\"",
         )
         private val FINAL_PUNCTUATION = setOf('.', '!', '?')
+        private val THINK_CLOSE_PATTERN = Regex("(?is)</think>")
     }
 }
