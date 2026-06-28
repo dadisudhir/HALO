@@ -117,6 +117,11 @@ class WatchSampleIngestor {
             val baseline = readBaseline(db, patch.day)
             val latestHr = patch.heartRates.lastOrNull()
             val avgHr = patch.heartRates.takeIf { it.isNotEmpty() }?.average()
+            val currentHr = if (patch.day == payload.capturedAt.toLocalDateString()) {
+                payload.latestHeartRateBpm ?: latestHr
+            } else {
+                latestHr
+            }
             val restingHr = payload.restingBpm ?: baseline.restingBpm
             db.insertWithOnConflict(
                 "daily_health_summaries",
@@ -124,7 +129,7 @@ class WatchSampleIngestor {
                 ContentValues().apply {
                     put("day", patch.day)
                     put("resting_bpm", restingHr)
-                    put("average_heart_rate", avgHr ?: latestHr ?: baseline.averageHeartRate)
+                    put("average_heart_rate", currentHr ?: avgHr ?: baseline.averageHeartRate)
                     put("daily_steps", payload.steps ?: baseline.dailySteps)
                     put("sleep_hours", patch.sleepHours ?: baseline.sleepHours)
                     put("sleep_efficiency", patch.sleepEfficiency ?: baseline.sleepEfficiency)
