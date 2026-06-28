@@ -16,6 +16,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -26,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.PathEffect
@@ -34,6 +36,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.health.secondbrain.model.DeltaDirection
+import com.health.secondbrain.model.Metric
 import com.health.secondbrain.model.OrganNode
 import com.health.secondbrain.model.OrganRegistry
 import com.health.secondbrain.ui.components.OrganAssetIcon
@@ -71,16 +75,17 @@ private data class BubbleNode(
 )
 
 // Layout tuning ---------------------------------------------------------------
-private const val HEX_SIZE_DP = 60f       // hex spacing
-private const val YOU_RADIUS_DP = 52f
-private const val ORGAN_RADIUS_DP = 34f
-private const val DECO_RADIUS_DP = 13f
+private const val HEX_SIZE_DP = 82f       // hex spacing
+private const val YOU_RADIUS_DP = 70f
+private const val ORGAN_RADIUS_DP = 50f
+private const val DECO_RADIUS_DP = 16f
 private const val RING_COUNT = 4          // how far the decoration field extends
 
-private const val MAX_SCALE = 1.7f
+private const val MAX_SCALE = 1.9f
 private const val MIN_SCALE = 0.16f
-private const val SIGMA_FRACTION = 0.26f  // gaussian width as fraction of min screen dim
+private const val SIGMA_FRACTION = 0.30f  // gaussian width as fraction of min screen dim
 private const val FLOAT_AMP_PX = 5f       // breathing amplitude
+private const val CENTER_Y_FRACTION = 0.36f  // vertical anchor of the cluster (lower = higher up)
 
 /** Axial coordinates of every cell in a single hex ring (radius 0 = centre). */
 private fun hexRing(radius: Int): List<Pair<Int, Int>> {
@@ -109,16 +114,24 @@ private fun axialToDp(q: Int, r: Int): Offset {
     return Offset(x, y)
 }
 
-/** Build the full node list: YOU at centre, organs in the inner rings, the
- *  remaining cells filled with faint unfilled decoration bubbles. */
+/** Build the full node list: YOU at centre, the 7 organs in the cells closest
+ *  to the centre (so they cluster tightly around YOU), and every remaining cell
+ *  filled with a faint unfilled decoration bubble. */
 private fun buildNodes(): List<BubbleNode> {
     val cells = ArrayList<Pair<Int, Int>>()
     for (ring in 0..RING_COUNT) cells.addAll(hexRing(ring))
 
-    val organs = OrganRegistry.all
-    val nodes = ArrayList<BubbleNode>(cells.size)
+    // Sort cells by distance from the centre so organ slots are always the
+    // nearest available cells, regardless of how many organs there are.
+    val sorted = cells.sortedBy { (q, r) ->
+        val p = axialToDp(q, r)
+        p.x * p.x + p.y * p.y
+    }
 
-    cells.forEachIndexed { index, (q, r) ->
+    val organs = OrganRegistry.all
+    val nodes = ArrayList<BubbleNode>(sorted.size)
+
+    sorted.forEachIndexed { index, (q, r) ->
         val p = axialToDp(q, r)
         when {
             index == 0 -> nodes.add(
@@ -212,7 +225,7 @@ private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
             val wPx = with(density) { maxWidth.toPx() }
             val hPx = with(density) { maxHeight.toPx() }
             val centerX = wPx / 2f
-            val centerY = hPx / 2f
+            val centerY = hPx * CENTER_Y_FRACTION
             val sigma = minOf(wPx, hPx) * SIGMA_FRACTION
 
             val pan = Offset(panX.value, panY.value)
@@ -303,7 +316,19 @@ private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
                         contentAlignment = Alignment.Center
                     ) {
                         when (node.kind) {
-                            NodeKind.You -> YouBubble()
+                            NodeKind.You -> YouBubble(
+                                focused = isFocused,
+                                onTap = {
+                                    if (!isFocused) {
+                                        scope.launch {
+                                            panX.animateTo(-baseX, spring(Spring.DampingRatioLowBouncy, Spring.StiffnessLow))
+                                        }
+                                        scope.launch {
+                                            panY.animateTo(-baseY, spring(Spring.DampingRatioLowBouncy, Spring.StiffnessLow))
+                                        }
+                                    }
+                                }
+                            )
                             NodeKind.Decoration -> DecorationBubble()
                             NodeKind.Organ -> OrganBubble(
                                 organ = node.organ!!,
@@ -326,24 +351,33 @@ private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
                     }
                 }
 
-                // Focused organ caption, anchored to the bottom of the cluster.
-                val focused = nodes.firstOrNull { it.key == focusKey }?.organ
-                if (focused != null) {
-                    Column(
-                        Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 8.dp)
-                            .fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(focused.displayName, style = Type.tinyBold, color = Palette.TextPrimary)
-                        Text(
-                            focused.previewSummary,
-                            style = Type.caption,
-                            color = Palette.TextSecondary,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 2.dp)
+                // Bottom overview card — fills the lower half of the cluster.
+                // Personal stats when YOU is centred, otherwise the focused
+                // organ's metrics + summary + next step.
+                val focusedNode = nodes.firstOrNull { it.key == focusKey }
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.42f),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    if (focusedNode?.kind == NodeKind.You) {
+                        OverviewCard(
+                            title = "Your overview",
+                            accent = Palette.TextPrimary,
+                            stats = PERSONAL_STATS,
+                            note = "Recovery lagging — protect tonight's sleep."
                         )
+                    } else {
+                        focusedNode?.organ?.let { organ ->
+                            OverviewCard(
+                                title = organ.displayName,
+                                accent = organ.accent,
+                                stats = organ.metrics.map { it.toOverviewStat() },
+                                note = organ.sentenceNextStep
+                            )
+                        }
                     }
                 }
             }
@@ -352,17 +386,123 @@ private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
 }
 
 @Composable
-private fun YouBubble() {
+private fun YouBubble(focused: Boolean, onTap: () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Palette.Surface, CircleShape),
+            .background(Palette.Surface, CircleShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onTap() },
         contentAlignment = Alignment.Center
     ) {
         Canvas(Modifier.fillMaxSize()) {
-            drawCircle(color = Palette.Border, style = Stroke(width = 2f))
+            drawCircle(
+                color = if (focused) Palette.TextPrimary.copy(alpha = 0.5f) else Palette.Border,
+                style = Stroke(width = if (focused) 3f else 2f)
+            )
         }
         Text("YOU", style = Type.label, color = Palette.TextPrimary)
+    }
+}
+
+private data class OverviewStat(
+    val label: String,
+    val value: String,
+    val delta: String? = null,
+    val color: Color,
+)
+
+private val PERSONAL_STATS = listOf(
+    OverviewStat("Recovery", "62%", "▼", Palette.Warning),
+    OverviewStat("Strain", "71", "▲", Palette.Heart),
+    OverviewStat("Readiness", "58", "▼", Palette.Sleep),
+    OverviewStat("Sleep", "6h44m", "▼", Palette.Lungs),
+    OverviewStat("HRV", "42", "▼", Palette.Brain),
+    OverviewStat("Hydration", "61%", "–", Palette.Kidney),
+)
+
+private fun Metric.toOverviewStat(): OverviewStat {
+    val color = when (direction) {
+        DeltaDirection.UpGood, DeltaDirection.DownGood -> Palette.Healthy
+        DeltaDirection.UpBad, DeltaDirection.DownBad -> Palette.Urgent
+        DeltaDirection.Neutral -> Palette.TextSecondary
+    }
+    return OverviewStat(label, value, deltaText, color)
+}
+
+@Composable
+private fun OverviewCard(
+    title: String,
+    accent: Color,
+    stats: List<OverviewStat>,
+    note: String?,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .background(Palette.Surface, RoundedCornerShape(22.dp))
+            .padding(horizontal = 18.dp, vertical = 18.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .background(accent, CircleShape)
+            )
+            Text(title, style = Type.bodyBold, color = Palette.TextPrimary)
+        }
+        Spacer(Modifier.height(16.dp))
+
+        // Stat table — two columns, populated top to bottom.
+        val rows = stats.chunked(2)
+        rows.forEachIndexed { i, row ->
+            Row(Modifier.fillMaxWidth()) {
+                row.forEach { stat ->
+                    Column(
+                        Modifier.weight(1f).padding(vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(stat.value, style = Type.titleSection, color = stat.color)
+                            stat.delta?.let {
+                                Text(
+                                    "  $it",
+                                    style = Type.caption,
+                                    color = stat.color.copy(alpha = 0.8f)
+                                )
+                            }
+                        }
+                        Text(stat.label, style = Type.caption, color = Palette.TextSecondary)
+                    }
+                }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
+            if (i < rows.lastIndex) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Palette.Border.copy(alpha = 0.4f))
+                )
+            }
+        }
+
+        if (note != null) {
+            Spacer(Modifier.height(14.dp))
+            Text(
+                note,
+                style = Type.bodySmall,
+                color = Palette.TextSecondary,
+                textAlign = TextAlign.Center
+            )
+        }
     }
 }
 
@@ -420,7 +560,7 @@ private fun OrganBubble(
             OrganAssetIcon(
                 organId = organ.id,
                 contentDescription = organ.displayName,
-                modifier = Modifier.fillMaxSize().padding(12.dp)
+                modifier = Modifier.fillMaxSize().padding(6.dp)
             )
         }
     }
