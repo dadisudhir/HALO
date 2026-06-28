@@ -22,6 +22,7 @@ import com.health.secondbrain.ui.screens.HomeScreen
 import com.health.secondbrain.ui.screens.OrganDetailScreen
 import com.health.secondbrain.ui.screens.YouScreen
 import com.health.secondbrain.ui.screens.YouScreenViewModel
+import kotlinx.coroutines.delay
 
 object Routes {
     const val Home = "home"
@@ -40,7 +41,10 @@ fun AppRoot() {
     }
     var mode by remember { mutableStateOf(HealthBackendMode.Fake) }
     val dashboard by produceState(initialValue = HealthDashboardUiState.Loading, repository, mode) {
-        value = repository.loadDashboard(mode)
+        while (true) {
+            value = repository.loadDashboard(mode)
+            delay(5_000)
+        }
     }
     val nav = rememberNavController()
     NavHost(navController = nav, startDestination = Routes.Home) {

@@ -15,6 +15,9 @@ data class HealthAgentContext(
     val demoDailySummaryCount: Int,
     val recordedRisk: RiskPrediction?,
     val clinicalObservations: List<ClinicalObservationSummary>,
+    val activeAlert: ActiveAlertSummary? = null,
+    val recentWatchEvents: List<WatchEventSummary> = emptyList(),
+    val signalTimeline: List<SignalChangeSummary> = emptyList(),
 ) {
     val hasRecordedBiometrics: Boolean = recordedDailySummaries.isNotEmpty()
 
@@ -59,6 +62,9 @@ data class HealthAgentContext(
             .put("latest_recorded_daily", latest?.toJson())
             .put("recent_recorded_daily", JSONArray(recent.map { it.toJson() }))
             .put("recorded_risk", recordedRisk?.toJson())
+            .put("active_alert", activeAlert?.toJson())
+            .put("recent_watch_events", JSONArray(recentWatchEvents.map { it.toJson() }))
+            .put("signal_timeline", JSONArray(signalTimeline.map { it.toJson() }))
             .put("clinical_observations", JSONArray(clinicalObservations.take(5).map { it.toJson() }))
             .put(
                 "missing_data_policy",
@@ -105,4 +111,29 @@ data class HealthAgentContext(
             .put("observed_at", observedAt)
             .put("source", source)
             .put("demo_source", source.isDemoHealthSource())
+
+    private fun ActiveAlertSummary.toJson(): JSONObject =
+        JSONObject(evidenceJson)
+            .put("id", id)
+            .put("alert_type", alertType)
+            .put("severity", severity)
+            .put("created_at", createdAt.toString())
+            .put("source", source)
+            .put("acknowledged", acknowledged)
+
+    private fun WatchEventSummary.toJson(): JSONObject =
+        JSONObject()
+            .put("id", id)
+            .put("received_at", receivedAt.toString())
+            .put("source", source)
+            .put("payload_type", payloadType)
+            .put("summary", summary)
+
+    private fun SignalChangeSummary.toJson(): JSONObject =
+        JSONObject()
+            .put("occurred_at", occurredAt)
+            .put("signal", signal)
+            .put("value", value)
+            .put("source", source)
+            .put("description", description)
 }

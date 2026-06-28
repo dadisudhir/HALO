@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
     <!-- Health Connect permissions — read-only for hackathon prototype -->
     <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>
@@ -61,6 +62,15 @@
                 <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE"/>
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".watch.WatchPacketReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.health.secondbrain.WATCH_PACKET" />
+                <action android:name="org.pytorch.minibench.ECG_PACKET" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>

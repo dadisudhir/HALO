@@ -8,6 +8,11 @@ class HaloHealthDatabase(context: Context) :
     SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
     override fun onCreate(db: SQLiteDatabase) {
+        createCoreTables(db)
+        createRealtimeWatchTables(db)
+    }
+
+    private fun createCoreTables(db: SQLiteDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS health_components (
@@ -105,7 +110,73 @@ class HaloHealthDatabase(context: Context) :
         )
     }
 
+    private fun createRealtimeWatchTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS watch_json_batches (
+                id TEXT PRIMARY KEY,
+                received_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                payload_type TEXT NOT NULL,
+                raw_json TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS ecg_sessions (
+                session_id TEXT PRIMARY KEY,
+                started_at TEXT,
+                ended_at TEXT,
+                sampling_hz REAL,
+                source TEXT NOT NULL,
+                inserted_at TEXT NOT NULL,
+                last_received_at TEXT NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                lead_off_count INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS ecg_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                sample_time TEXT,
+                sample_index INTEGER,
+                elapsed_ms INTEGER,
+                sampling_hz REAL,
+                ecg_mv REAL,
+                lead_off INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL,
+                batch_id TEXT,
+                raw_json TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES ecg_sessions(session_id),
+                FOREIGN KEY(batch_id) REFERENCES watch_json_batches(id)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS active_alerts (
+                id TEXT PRIMARY KEY,
+                alert_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                acknowledged INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent()
+        )
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 3) {
+            createRealtimeWatchTables(db)
+            return
+        }
         db.execSQL("DROP TABLE IF EXISTS risk_predictions")
         db.execSQL("DROP TABLE IF EXISTS feature_vectors")
         db.execSQL("DROP TABLE IF EXISTS user_inputs")
@@ -118,6 +189,6 @@ class HaloHealthDatabase(context: Context) :
 
     companion object {
         private const val DATABASE_NAME = "halo_health.db"
-        private const val DATABASE_VERSION = 2
+        private const val DATABASE_VERSION = 3
     }
 }

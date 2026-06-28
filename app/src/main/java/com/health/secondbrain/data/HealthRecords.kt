@@ -79,3 +79,40 @@ data class ClinicalObservationSummary(
     val observedAt: String?,
     val source: String,
 )
+
+data class WatchIngestResult(
+    val batchId: String,
+    val source: String,
+    val payloadType: String,
+    val receivedAt: Instant,
+    val dailySummariesUpserted: Int,
+    val ecgSamplesInserted: Int,
+    val activeAlert: ActiveAlertSummary?,
+    val riskPrediction: RiskPrediction,
+)
+
+data class ActiveAlertSummary(
+    val id: String,
+    val alertType: String,
+    val severity: String,
+    val createdAt: Instant,
+    val source: String,
+    val evidenceJson: String,
+    val acknowledged: Boolean,
+)
+
+data class WatchEventSummary(
+    val id: String,
+    val receivedAt: Instant,
+    val source: String,
+    val payloadType: String,
+    val summary: String,
+)
+
+data class SignalChangeSummary(
+    val occurredAt: String,
+    val signal: String,
+    val value: String,
+    val source: String,
+    val description: String,
+)

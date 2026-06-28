@@ -73,6 +73,15 @@ object HealthAgentPromptBuilder {
                 "${metric.label} ${metric.value}$delta"
             }
             .ifBlank { "none" }
+        val activeAlert = context.activeAlert?.let { alert ->
+            "type=${alert.alertType}; severity=${alert.severity}; source=${alert.source}; evidence=${alert.evidenceJson.take(700)}"
+        } ?: "none"
+        val watchEvents = context.recentWatchEvents
+            .joinToString(" | ") { "${it.receivedAt}: ${it.summary} (${it.source})" }
+            .ifBlank { "none" }
+        val signalTimeline = context.signalTimeline
+            .joinToString(" | ") { "${it.occurredAt}: ${it.signal}=${it.value}; ${it.description}" }
+            .ifBlank { "none" }
         return """
             organ=${organ.displayName}
             system=${organ.systemLabel}
@@ -85,6 +94,9 @@ object HealthAgentPromptBuilder {
             week_summary=${organ.sentenceWeek}
             month_summary=${organ.sentenceMonth}
             next_step=${organ.sentenceNextStep}
+            active_alert=$activeAlert
+            recent_watch_events=$watchEvents
+            signal_timeline=$signalTimeline
             policy=visible card values can be described as HALO UI context only; do not call them live watch-recorded medical conclusions.
         """.trimIndent()
     }
@@ -98,13 +110,13 @@ object HealthAgentPromptBuilder {
                 "Ask one concise clarification question. Do not infer health status."
 
             AgentRoute.LocalContext ->
-                "Explain the visible HALO graph/card. Mention at least one exact visible_metrics value."
+                "Explain the visible HALO graph/card. If active_alert is present, ground the answer in its evidence and recent_watch_events. Mention at least one exact value."
 
             AgentRoute.HealthStatus ->
-                "Summarize the HALO card status. If status_card=needs_attention, do not say normal or stable. Mention exact visible_metrics. If recorded_daily_count=0, say this is visible HALO card context, not live watch-recorded medical conclusion."
+                "Summarize the HALO card status. If active_alert is present, explain why it fired using its evidence. If status_card=needs_attention, do not say normal or stable. Mention exact visible_metrics or alert values. If recorded_daily_count=0, say this is visible HALO card context, not live watch-recorded medical conclusion."
 
             AgentRoute.NextStep ->
-                "Give one bounded next step from next_step. Mention it is based on HALO card context if recorded_daily_count=0."
+                "Give one bounded next step from next_step. If active_alert is present, include slow down/check symptoms guidance and use urgent care language only for severe symptoms. Mention it is based on HALO card context if recorded_daily_count=0."
 
             AgentRoute.GeneralHealth ->
                 "Answer from HALO context. Mention exact visible_metrics if present."
