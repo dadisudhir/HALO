@@ -11,6 +11,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -37,9 +38,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.health.secondbrain.model.DeltaDirection
+import com.health.secondbrain.data.HealthBackendMode
 import com.health.secondbrain.model.Metric
 import com.health.secondbrain.model.OrganNode
-import com.health.secondbrain.model.OrganRegistry
 import com.health.secondbrain.ui.components.OrganAssetIcon
 import com.health.secondbrain.ui.theme.Palette
 import com.health.secondbrain.ui.theme.Type
@@ -117,7 +118,7 @@ private fun axialToDp(q: Int, r: Int): Offset {
 /** Build the full node list: YOU at centre, the 7 organs in the cells closest
  *  to the centre (so they cluster tightly around YOU), and every remaining cell
  *  filled with a faint unfilled decoration bubble. */
-private fun buildNodes(): List<BubbleNode> {
+private fun buildNodes(organs: List<OrganNode>): List<BubbleNode> {
     val cells = ArrayList<Pair<Int, Int>>()
     for (ring in 0..RING_COUNT) cells.addAll(hexRing(ring))
 
@@ -128,7 +129,6 @@ private fun buildNodes(): List<BubbleNode> {
         p.x * p.x + p.y * p.y
     }
 
-    val organs = OrganRegistry.all
     val nodes = ArrayList<BubbleNode>(sorted.size)
 
     sorted.forEachIndexed { index, (q, r) ->
@@ -162,37 +162,88 @@ private fun fisheyeAlpha(distPx: Float, sigmaPx: Float): Float {
 }
 
 @Composable
-fun HomeScreen(onOrganTap: (String) -> Unit) {
-    val attentionCount = remember { OrganRegistry.all.count { !it.statusGood } }
+fun HomeScreen(
+    mode: HealthBackendMode = HealthBackendMode.Fake,
+    organs: List<OrganNode> = emptyList(),
+    overviewStats: List<Metric> = emptyList(),
+    overviewNote: String = "",
+    overviewLine: String = "Loading backend...",
+    backendStatus: String = "backend pending",
+    footerPrimary: String = "Waiting for health samples",
+    footerSecondary: String = "Waiting for component metrics",
+    onModeChange: (HealthBackendMode) -> Unit = {},
+    onOrganTap: (String) -> Unit,
+) {
+    val attentionCount = remember(organs) { organs.count { !it.statusGood } }
     Column(
         Modifier.fillMaxSize().background(Palette.BgBase).statusBarsPadding()
     ) {
         Column(Modifier.padding(horizontal = 18.dp, vertical = 10.dp)) {
-            Text("Hey, Pranav", style = Type.titleHero, color = Palette.TextPrimary)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Hey, Pranav", style = Type.titleHero, color = Palette.TextPrimary)
+                Spacer(Modifier.weight(1f))
+                ModeChip("Fake", mode == HealthBackendMode.Fake) {
+                    onModeChange(HealthBackendMode.Fake)
+                }
+                Spacer(Modifier.width(8.dp))
+                ModeChip("Real", mode == HealthBackendMode.Real) {
+                    onModeChange(HealthBackendMode.Real)
+                }
+            }
             Text(
                 "$attentionCount areas need attention",
                 style = Type.body, color = Palette.TextSecondary
             )
             Text(
-                "Recovery 62% · Strain 71 · Readiness 58",
+                overviewLine,
                 style = Type.caption, color = Palette.TextMuted
             )
+            Text(backendStatus, style = Type.caption, color = Palette.TextMuted)
         }
 
         BubbleCluster(
             modifier = Modifier.weight(1f).fillMaxWidth(),
+            organs = organs,
+            overviewStats = overviewStats,
+            overviewNote = overviewNote,
             onOrganTap = onOrganTap
         )
 
-        HomeFooter()
+        HomeFooter(footerPrimary = footerPrimary, footerSecondary = footerSecondary)
     }
 }
 
 @Composable
-private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
+private fun ModeChip(label: String, selected: Boolean, onTap: () -> Unit) {
+    Box(
+        Modifier
+            .background(
+                if (selected) Palette.TextPrimary else Palette.Surface,
+                RoundedCornerShape(18.dp)
+            )
+            .border(1.dp, Palette.Border, RoundedCornerShape(18.dp))
+            .clickable { onTap() }
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Text(
+            label,
+            style = Type.caption,
+            color = if (selected) Color.Black else Palette.TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun BubbleCluster(
+    modifier: Modifier,
+    organs: List<OrganNode>,
+    overviewStats: List<Metric>,
+    overviewNote: String,
+    onOrganTap: (String) -> Unit,
+) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    val nodes = remember { buildNodes() }
+    val nodes = remember(organs) { buildNodes(organs) }
 
     // 2D pan offset, in px, as two springable channels.
     val panX = remember { Animatable(0f) }
@@ -366,8 +417,8 @@ private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
                         OverviewCard(
                             title = "Your overview",
                             accent = Palette.TextPrimary,
-                            stats = PERSONAL_STATS,
-                            note = "Recovery lagging — protect tonight's sleep."
+                            stats = overviewStats.map { it.toOverviewStat() },
+                            note = overviewNote.ifBlank { null }
                         )
                     } else {
                         focusedNode?.organ?.let { organ ->
@@ -412,15 +463,6 @@ private data class OverviewStat(
     val value: String,
     val delta: String? = null,
     val color: Color,
-)
-
-private val PERSONAL_STATS = listOf(
-    OverviewStat("Recovery", "62%", "▼", Palette.Warning),
-    OverviewStat("Strain", "71", "▲", Palette.Heart),
-    OverviewStat("Readiness", "58", "▼", Palette.Sleep),
-    OverviewStat("Sleep", "6h44m", "▼", Palette.Lungs),
-    OverviewStat("HRV", "42", "▼", Palette.Brain),
-    OverviewStat("Hydration", "61%", "–", Palette.Kidney),
 )
 
 private fun Metric.toOverviewStat(): OverviewStat {
@@ -558,7 +600,7 @@ private fun OrganBubble(
             contentAlignment = Alignment.Center
         ) {
             OrganAssetIcon(
-                organId = organ.id,
+                iconAsset = organ.iconAsset,
                 contentDescription = organ.displayName,
                 modifier = Modifier.fillMaxSize().padding(6.dp)
             )
@@ -567,7 +609,7 @@ private fun OrganBubble(
 }
 
 @Composable
-private fun HomeFooter() {
+private fun HomeFooter(footerPrimary: String, footerSecondary: String) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -577,7 +619,11 @@ private fun HomeFooter() {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text("Tap a bubble to open details", style = Type.bodySmall, color = Palette.TextPrimary)
-        Text("RHR 64 (+6) · HRV 42 (-8) · Sleep 6h44m", style = Type.caption, color = Palette.TextSecondary)
-        Text("Hydration 61% · VO₂ 46 · Focus 72", style = Type.caption, color = Palette.TextMuted)
+        if (footerPrimary.isNotBlank()) {
+            Text(footerPrimary, style = Type.caption, color = Palette.TextSecondary)
+        }
+        if (footerSecondary.isNotBlank()) {
+            Text(footerSecondary, style = Type.caption, color = Palette.TextMuted)
+        }
     }
 }

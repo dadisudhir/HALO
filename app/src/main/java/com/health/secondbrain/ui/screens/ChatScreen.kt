@@ -11,6 +11,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,14 +20,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.os.Handler
+import android.os.Looper
+import com.health.secondbrain.data.HaloHealthRepository
+import com.health.secondbrain.data.HealthBackendMode
+import com.health.secondbrain.llm.AgentVisual
+import com.health.secondbrain.llm.AgentResponse
 import com.health.secondbrain.llm.OnDeviceLlmService
-import com.health.secondbrain.model.OrganRegistry
+import com.health.secondbrain.model.OrganNode
+import com.health.secondbrain.ui.components.LineSpark
 import com.health.secondbrain.ui.components.OrganAssetIcon
+import com.health.secondbrain.ui.components.WeekBars
 import com.health.secondbrain.ui.theme.Palette
 import com.health.secondbrain.ui.theme.Type
 import kotlinx.coroutines.launch
@@ -33,21 +45,31 @@ import kotlinx.coroutines.launch
 private sealed class ChatMsg {
     data class User(val text: String) : ChatMsg()
     data class Ai(val text: String) : ChatMsg()
+    data class Status(val text: String) : ChatMsg()
+    data class Graph(val organ: OrganNode, val visual: AgentVisual) : ChatMsg()
     data object Typing : ChatMsg()
 }
 
 @Composable
-fun ChatScreen(organId: String, onBack: () -> Unit) {
-    val organ = OrganRegistry.byId(organId)
-    val llm = remember { OnDeviceLlmService() }
+fun ChatScreen(
+    organId: String,
+    organ: OrganNode? = null,
+    mode: HealthBackendMode,
+    repository: HaloHealthRepository,
+    onBack: () -> Unit,
+) {
+    val organ = organ ?: return MissingChatComponent(organId = organId, onBack = onBack)
+    val context = LocalContext.current
+    val llm = remember(context) { OnDeviceLlmService(context.applicationContext) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
-    var messages by remember {
+    var messages by remember(organ.id) {
         mutableStateOf<List<ChatMsg>>(
             listOf(
                 ChatMsg.Ai("Hi — I'm your ${organ.displayName.lowercase()} coach. " +
-                    "I know your last 30 days. What do you want to look at?")
+                    "Ask me what changed or what to look at next.")
             )
         )
     }
@@ -55,11 +77,37 @@ fun ChatScreen(organId: String, onBack: () -> Unit) {
 
     fun send(text: String) {
         if (text.isBlank()) return
+        if (messages.any { it is ChatMsg.Typing }) return
         messages = messages + ChatMsg.User(text) + ChatMsg.Typing
         input = ""
         scope.launch {
-            val reply = llm.generate(organ, OnDeviceLlmService.Prompt.Chat, text)
-            messages = messages.filterNot { it is ChatMsg.Typing } + ChatMsg.Ai(reply)
+            var streamActive = true
+            val reply = runCatching {
+                val agentContext = repository.loadAgentContext(mode, organ)
+                llm.generateChat(
+                    context = agentContext,
+                    userMessage = text,
+                    onToken = { delta ->
+                        if (delta.isBlank()) return@generateChat
+                        mainHandler.post {
+                            if (streamActive) {
+                                messages = appendAssistantDelta(messages, delta)
+                            }
+                        }
+                    },
+                )
+            }.getOrElse { error ->
+                AgentResponse(
+                    text = "HALO agent context is unavailable: ${error.message ?: error.javaClass.simpleName}",
+                    statusLine = "context unavailable",
+                )
+            }
+            streamActive = false
+            val status = reply.statusLine?.let { ChatMsg.Status(it) }
+            val graph = reply.visual
+                ?.takeIf { it.domainId == organ.id }
+                ?.let { ChatMsg.Graph(organ, it) }
+            messages = finishAssistantMessage(messages, status, reply.text, graph)
         }
     }
 
@@ -86,7 +134,7 @@ fun ChatScreen(organId: String, onBack: () -> Unit) {
                 contentAlignment = Alignment.Center
             ) {
                 OrganAssetIcon(
-                    organId = organ.id,
+                    iconAsset = organ.iconAsset,
                     contentDescription = organ.displayName,
                     modifier = Modifier
                         .size(24.dp)
@@ -117,6 +165,8 @@ fun ChatScreen(organId: String, onBack: () -> Unit) {
                 when (msg) {
                     is ChatMsg.User -> UserBubble(msg.text)
                     is ChatMsg.Ai   -> AiBubble(msg.text)
+                    is ChatMsg.Status -> StatusLine(msg.text)
+                    is ChatMsg.Graph -> GraphBubble(msg.organ, msg.visual)
                     ChatMsg.Typing  -> TypingBubble()
                 }
             }
@@ -150,6 +200,8 @@ fun ChatScreen(organId: String, onBack: () -> Unit) {
                     ),
                     cursorBrush = SolidColor(Palette.TextPrimary),
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { send(input) }),
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -164,6 +216,59 @@ fun ChatScreen(organId: String, onBack: () -> Unit) {
                 Text("↑", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             }
         }
+    }
+}
+
+private fun appendAssistantDelta(messages: List<ChatMsg>, delta: String): List<ChatMsg> {
+    val withoutTyping = messages.filterNot { it is ChatMsg.Typing }
+    val last = withoutTyping.lastOrNull()
+    return if (last is ChatMsg.Ai) {
+        withoutTyping.dropLast(1) + last.copy(text = last.text + delta)
+    } else {
+        withoutTyping + ChatMsg.Ai(delta)
+    }
+}
+
+private fun finishAssistantMessage(
+    messages: List<ChatMsg>,
+    status: ChatMsg.Status?,
+    finalText: String,
+    graph: ChatMsg.Graph? = null,
+): List<ChatMsg> {
+    val withoutTyping = messages.filterNot { it is ChatMsg.Typing }
+    val withoutPartial = if (withoutTyping.lastOrNull() is ChatMsg.Ai) {
+        withoutTyping.dropLast(1)
+    } else {
+        withoutTyping
+    }
+    return withoutPartial + listOfNotNull(status, ChatMsg.Ai(finalText), graph)
+}
+
+@Composable
+private fun MissingChatComponent(organId: String, onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(Palette.BgBase).statusBarsPadding().padding(18.dp)) {
+        Text("‹", style = Type.titleScreen, color = Palette.TextPrimary,
+            modifier = Modifier.clickable { onBack() })
+        Spacer(Modifier.height(28.dp))
+        Text("Coach unavailable", style = Type.titleScreen, color = Palette.TextPrimary)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "$organId is not enabled in the backend health_components table.",
+            style = Type.body,
+            color = Palette.TextSecondary
+        )
+    }
+}
+
+@Composable
+private fun StatusLine(text: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        Text(
+            text,
+            style = Type.caption,
+            color = Palette.TextMuted,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -204,6 +309,85 @@ private fun AiBubble(text: String) {
                 .padding(horizontal = 14.dp, vertical = 11.dp)
         ) {
             Text(text, color = Palette.AiBubbleText, style = Type.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun GraphBubble(organ: OrganNode, visual: AgentVisual) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(
+            Modifier
+                .fillMaxWidth(0.88f)
+                .background(Palette.SurfaceElev, RoundedCornerShape(18.dp))
+                .border(
+                    1.dp,
+                    organ.accent.copy(alpha = 0.38f),
+                    RoundedCornerShape(18.dp)
+                )
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(34.dp)
+                        .background(organ.tint, CircleShape)
+                        .border(1.dp, organ.accent.copy(alpha = 0.45f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    OrganAssetIcon(
+                        iconAsset = organ.iconAsset,
+                        contentDescription = organ.displayName,
+                        modifier = Modifier
+                            .size(23.dp)
+                            .padding(2.dp)
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(visual.title, style = Type.bodyBold, color = Palette.TextPrimary)
+                    Text(visual.caption, style = Type.caption, color = Palette.TextMuted)
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            LineSpark(
+                values = organ.chart7Day,
+                color = organ.accent,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(74.dp)
+            )
+
+            Spacer(Modifier.height(10.dp))
+            WeekBars(
+                values = organ.activeZones,
+                color = organ.accent,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+            )
+
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                organ.metrics.take(2).forEach { metric ->
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .background(Palette.Surface, RoundedCornerShape(12.dp))
+                            .border(1.dp, Palette.Border, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Text(metric.label, style = Type.caption, color = Palette.TextMuted)
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "${metric.value} ${metric.deltaText}".trim(),
+                            style = Type.bodyBold,
+                            color = Palette.TextPrimary
+                        )
+                    }
+                }
+            }
         }
     }
 }

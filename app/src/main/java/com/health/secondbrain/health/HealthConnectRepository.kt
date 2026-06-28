@@ -16,9 +16,8 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 
 /**
- * Thin wrapper around Health Connect. The UI today renders demo data from
- * OrganRegistry; this class is the seam where live S25 Ultra Health Connect
- * records get pulled in for the live demo.
+ * Thin wrapper around Health Connect. This class is the seam where live S25
+ * Ultra Health Connect records get pulled into the backend repository.
  */
 class HealthConnectRepository(private val context: Context) {
 

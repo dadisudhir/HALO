@@ -1,12 +1,8 @@
 package com.health.secondbrain.ui.components
 
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -21,27 +17,16 @@ import coil.compose.rememberAsyncImagePainter
 import coil.decode.SvgDecoder
 import coil.request.ImageRequest
 
-private val organAssetFile = mapOf(
-    "heart" to "heart-organ.svg",
-    "liver" to "stomach-organ.svg",
-    "gut" to "intestine-organ.svg",
-    "sleep" to "thymus-gland-organ.svg",
-    "lungs" to "lungs-organ.svg",
-    "kidney" to "kidney-organ.svg",
-    "brain" to "brain-organ.svg",
-)
-
 @Composable
 fun OrganAssetIcon(
-    organId: String,
+    iconAsset: String,
     contentDescription: String,
     modifier: Modifier = Modifier,
     tint: Color? = null,
 ) {
     val context = LocalContext.current
-    val fileName = organAssetFile[organId]
-    if (fileName == null) {
-        FallbackIcon(organId, modifier)
+    if (iconAsset.isBlank()) {
+        EmptyIcon(modifier)
         return
     }
 
@@ -51,9 +36,14 @@ fun OrganAssetIcon(
             .build()
     }
 
-    val request = remember(fileName, context) {
+    val request = remember(iconAsset, context) {
+        val assetUri = if (iconAsset.startsWith("file://")) {
+            iconAsset
+        } else {
+            "file:///android_asset/$iconAsset"
+        }
         ImageRequest.Builder(context)
-            .data("file:///android_asset/organs/$fileName")
+            .data(assetUri)
             .decoderFactory(SvgDecoder.Factory())
             .crossfade(false)
             .build()
@@ -65,7 +55,7 @@ fun OrganAssetIcon(
     )
 
     if (painter.state is AsyncImagePainter.State.Error) {
-        FallbackIcon(organId, modifier)
+        EmptyIcon(modifier)
     } else {
         Image(
             painter = painter,
@@ -78,14 +68,9 @@ fun OrganAssetIcon(
 }
 
 @Composable
-private fun FallbackIcon(organId: String, modifier: Modifier) {
+private fun EmptyIcon(modifier: Modifier) {
     Box(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = organId.take(1).uppercase(),
-            color = Color.White.copy(alpha = 0.92f)
-        )
-    }
+    ) {}
 }

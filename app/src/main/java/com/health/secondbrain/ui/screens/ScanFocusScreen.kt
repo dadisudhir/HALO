@@ -28,7 +28,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.health.secondbrain.model.OrganRegistry
+import com.health.secondbrain.model.OrganNode
 import com.health.secondbrain.ui.components.OrganAssetIcon
 import com.health.secondbrain.ui.theme.Palette
 import com.health.secondbrain.ui.theme.Type
@@ -36,10 +36,12 @@ import com.health.secondbrain.ui.theme.Type
 @Composable
 fun ScanFocusScreen(
     organId: String,
+    organ: OrganNode? = null,
+    nearbyOrgans: List<OrganNode> = emptyList(),
     onClose: () -> Unit,
     onOpenDetails: () -> Unit,
 ) {
-    val organ = OrganRegistry.byId(organId)
+    val organ = organ ?: return MissingScanComponent(organId = organId, onClose = onClose)
 
     val transition = rememberInfiniteTransition(label = "scan-focus")
     val r1 by transition.animateFloat(
@@ -77,7 +79,7 @@ fun ScanFocusScreen(
         Box(Modifier.align(Alignment.Center)) {
             // dimmed orbiting dots — purely decorative
             Box(Modifier.size(280.dp).alpha(0.22f), contentAlignment = Alignment.Center) {
-                OrganRegistry.all.filter { it.id != organId }.forEachIndexed { i, o ->
+                nearbyOrgans.filter { it.id != organId }.forEachIndexed { i, o ->
                     val angle = (360f / 6f) * i
                     val rotated = androidx.compose.ui.unit.IntOffset.Zero
                     Box(
@@ -121,7 +123,7 @@ fun ScanFocusScreen(
                 contentAlignment = Alignment.Center
             ) {
                 OrganAssetIcon(
-                    organId = organ.id,
+                    iconAsset = organ.iconAsset,
                     contentDescription = organ.displayName,
                     modifier = Modifier
                         .size(80.dp)
@@ -181,5 +183,23 @@ fun ScanFocusScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun MissingScanComponent(organId: String, onClose: () -> Unit) {
+    Box(Modifier.fillMaxSize().background(Palette.BgBase).statusBarsPadding()) {
+        Text(
+            "Component $organId unavailable",
+            style = Type.bodyBold,
+            color = Palette.TextPrimary,
+            modifier = Modifier.align(Alignment.Center)
+        )
+        Text(
+            "close",
+            style = Type.bodyBold,
+            color = Palette.TextSecondary,
+            modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).clickable { onClose() }
+        )
     }
 }

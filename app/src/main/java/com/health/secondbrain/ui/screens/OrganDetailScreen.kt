@@ -19,7 +19,6 @@ import androidx.compose.ui.unit.sp
 import com.health.secondbrain.model.DeltaDirection
 import com.health.secondbrain.model.Metric
 import com.health.secondbrain.model.OrganNode
-import com.health.secondbrain.model.OrganRegistry
 import com.health.secondbrain.ui.components.LineSpark
 import com.health.secondbrain.ui.components.OrganAssetIcon
 import com.health.secondbrain.ui.components.WeekBars
@@ -29,10 +28,11 @@ import com.health.secondbrain.ui.theme.Type
 @Composable
 fun OrganDetailScreen(
     organId: String,
+    organ: OrganNode? = null,
     onBack: () -> Unit,
     onOpenChat: () -> Unit,
 ) {
-    val organ = OrganRegistry.byId(organId)
+    val organ = organ ?: return MissingComponent(organId = organId, onBack = onBack)
     Column(
         Modifier
             .fillMaxSize()
@@ -102,7 +102,7 @@ private fun Hero(organ: OrganNode) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             OrganAssetIcon(
-                organId = organ.id,
+                iconAsset = organ.iconAsset,
                 contentDescription = organ.displayName,
                 modifier = Modifier
                     .size(96.dp)
@@ -110,11 +110,37 @@ private fun Hero(organ: OrganNode) {
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "[3D cartoon ${organ.displayName.lowercase()} — rotatable]",
+                organ.componentType.replace('_', ' '),
                 style = Type.caption,
                 color = organ.accent.copy(alpha = 0.85f)
             )
         }
+    }
+}
+
+@Composable
+private fun MissingComponent(organId: String, onBack: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Palette.BgBase)
+            .statusBarsPadding()
+            .padding(18.dp)
+    ) {
+        Text(
+            "‹ Body",
+            style = Type.bodyBold,
+            color = Palette.TextPrimary,
+            modifier = Modifier.clickable { onBack() }
+        )
+        Spacer(Modifier.height(28.dp))
+        Text("Component unavailable", style = Type.titleScreen, color = Palette.TextPrimary)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "$organId is not enabled in the backend health_components table.",
+            style = Type.body,
+            color = Palette.TextSecondary
+        )
     }
 }
 

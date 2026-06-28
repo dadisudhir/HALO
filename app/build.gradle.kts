@@ -11,7 +11,8 @@ android {
     defaultConfig {
         applicationId = "com.health.secondbrain"
         minSdk = 31
-        targetSdk = 35
+        // Match the proven MiniBench QNN host while the DSP skel loader is validated.
+        targetSdk = 33
         versionCode = 1
         versionName = "0.1.0"
 
@@ -35,6 +36,7 @@ android {
     buildFeatures { compose = true }
 
     packaging {
+        jniLibs.useLegacyPackaging = true
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 }
@@ -62,9 +64,10 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // ExecuTorch runtime — bundled .aar lives in app/libs once the team drops it in.
-    // Comment out until the .aar is added so initial Gradle sync works.
-    // implementation(files("libs/executorch.aar"))
+    // ExecuTorch runtime used by the on-device Qwen health agent.
+    implementation(files("libs/executorch.aar"))
+    implementation("com.facebook.soloader:soloader:0.10.5")
+    implementation("com.facebook.fbjni:fbjni:0.7.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
