@@ -415,6 +415,8 @@ class HaloHealthRepository(context: Context) {
         val parts = buildList {
             root.optDoubleOrNull("heart_rate_bpm")?.let { add("HR ${it.toInt()} bpm") }
             root.optDoubleOrNull("heartRateBpm")?.let { add("HR ${it.toInt()} bpm") }
+            root.optDoubleOrNull("resting_hr_bpm")?.let { add("resting ${it.toInt()} bpm") }
+            root.optDoubleOrNull("restingBpm")?.let { add("resting ${it.toInt()} bpm") }
             root.optString("irregular_rhythm_status").takeIf { it.isNotBlank() }?.let { add("rhythm $it") }
             root.optJSONObject("heartRate")?.optString("latestBpm")?.takeIf { it.isNotBlank() }?.let { add("HR $it bpm") }
             root.optJSONObject("irregularRhythm")?.optInt("detectedRows", 0)?.takeIf { it > 0 }?.let {
