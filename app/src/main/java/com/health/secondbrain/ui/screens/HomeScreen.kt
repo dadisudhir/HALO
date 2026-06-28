@@ -1,85 +1,168 @@
 package com.health.secondbrain.ui.screens
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.GridView
-import androidx.compose.material.icons.outlined.Menu
-import androidx.compose.material.icons.outlined.ShowChart
-import androidx.compose.material3.Icon
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.health.secondbrain.model.OrganNode
 import com.health.secondbrain.model.OrganRegistry
 import com.health.secondbrain.ui.components.OrganAssetIcon
 import com.health.secondbrain.ui.theme.Palette
 import com.health.secondbrain.ui.theme.Type
+import kotlinx.coroutines.launch
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.exp
+import kotlin.math.hypot
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 
-private data class BubblePos(val xFrac: Float, val yFrac: Float, val rDp: Float)
+/* ----------------------------------------------------------------------------
+ * Gravity bubble cluster.
+ *
+ * Every bubble lives on a hex grid centred on the "YOU" node. Each bubble's
+ * rendered scale + opacity is a smooth (gaussian) function of how far its
+ * centre sits from the middle of the viewport, so whatever is in the middle
+ * swells up large and the outskirts shrink to faint dots — the Apple-Watch
+ * honeycomb fisheye. The surface is draggable in 2D; releasing a drag lets a
+ * spring pull the nearest bubble back to dead-centre (the "gravity" settle).
+ * ------------------------------------------------------------------------- */
 
-/* Layout from the spec, viewbox 320x444 → fractions. */
-private val DECORATIONS = listOf(
-    BubblePos(70/320f, 70/444f, 15f),
-    BubblePos(250/320f, 64/444f, 13f),
-    BubblePos(285/320f, 150/444f, 16f),
-    BubblePos(40/320f, 158/444f, 13f),
-    BubblePos(278/320f, 300/444f, 14f),
-    BubblePos(48/320f, 318/444f, 16f),
-    BubblePos(120/320f, 392/444f, 13f),
-    BubblePos(222/320f, 386/444f, 15f),
-    BubblePos(300/320f, 232/444f, 11f),
-    BubblePos(28/320f, 244/444f, 11f),
+private enum class NodeKind { You, Organ, Decoration }
+
+private data class BubbleNode(
+    val key: String,
+    val kind: NodeKind,
+    val baseXDp: Float,        // grid position relative to YOU, in dp
+    val baseYDp: Float,
+    val baseRadiusDp: Float,
+    val organ: OrganNode? = null,
 )
 
-private val ORGAN_POS = mapOf(
-    "heart"  to BubblePos(158/320f, 196/444f, 46f),
-    "liver"  to BubblePos(232/320f, 138/444f, 34f),
-    "gut"    to BubblePos(240/320f, 226/444f, 28f),
-    "sleep"  to BubblePos(92/320f, 150/444f, 27f),
-    "lungs"  to BubblePos(92/320f, 244/444f, 26f),
-    "kidney" to BubblePos(166/320f, 288/444f, 25f),
-    "brain"  to BubblePos(232/320f, 300/444f, 20f),
-)
+// Layout tuning ---------------------------------------------------------------
+private const val HEX_SIZE_DP = 60f       // hex spacing
+private const val YOU_RADIUS_DP = 52f
+private const val ORGAN_RADIUS_DP = 34f
+private const val DECO_RADIUS_DP = 13f
+private const val RING_COUNT = 4          // how far the decoration field extends
+
+private const val MAX_SCALE = 1.7f
+private const val MIN_SCALE = 0.16f
+private const val SIGMA_FRACTION = 0.26f  // gaussian width as fraction of min screen dim
+private const val FLOAT_AMP_PX = 5f       // breathing amplitude
+
+/** Axial coordinates of every cell in a single hex ring (radius 0 = centre). */
+private fun hexRing(radius: Int): List<Pair<Int, Int>> {
+    if (radius == 0) return listOf(0 to 0)
+    // axial directions matching cube dirs
+    val dirs = listOf(
+        1 to 0, 1 to -1, 0 to -1, -1 to 0, -1 to 1, 0 to 1
+    )
+    val out = ArrayList<Pair<Int, Int>>(6 * radius)
+    var q = -radius
+    var r = radius
+    for (i in 0 until 6) {
+        for (j in 0 until radius) {
+            out.add(q to r)
+            q += dirs[i].first
+            r += dirs[i].second
+        }
+    }
+    return out
+}
+
+/** pointy-top axial -> pixel (in dp units). */
+private fun axialToDp(q: Int, r: Int): Offset {
+    val x = HEX_SIZE_DP * (sqrt(3f) * q + sqrt(3f) / 2f * r)
+    val y = HEX_SIZE_DP * (1.5f * r)
+    return Offset(x, y)
+}
+
+/** Build the full node list: YOU at centre, organs in the inner rings, the
+ *  remaining cells filled with faint unfilled decoration bubbles. */
+private fun buildNodes(): List<BubbleNode> {
+    val cells = ArrayList<Pair<Int, Int>>()
+    for (ring in 0..RING_COUNT) cells.addAll(hexRing(ring))
+
+    val organs = OrganRegistry.all
+    val nodes = ArrayList<BubbleNode>(cells.size)
+
+    cells.forEachIndexed { index, (q, r) ->
+        val p = axialToDp(q, r)
+        when {
+            index == 0 -> nodes.add(
+                BubbleNode("you", NodeKind.You, p.x, p.y, YOU_RADIUS_DP)
+            )
+            index <= organs.size -> {
+                val organ = organs[index - 1]
+                nodes.add(
+                    BubbleNode(organ.id, NodeKind.Organ, p.x, p.y, ORGAN_RADIUS_DP, organ)
+                )
+            }
+            else -> nodes.add(
+                BubbleNode("deco_$index", NodeKind.Decoration, p.x, p.y, DECO_RADIUS_DP)
+            )
+        }
+    }
+    return nodes
+}
+
+private fun fisheyeScale(distPx: Float, sigmaPx: Float): Float {
+    val g = exp(-(distPx * distPx) / (2f * sigmaPx * sigmaPx))
+    return MIN_SCALE + (MAX_SCALE - MIN_SCALE) * g
+}
+
+private fun fisheyeAlpha(distPx: Float, sigmaPx: Float): Float {
+    val g = exp(-(distPx * distPx) / (2f * sigmaPx * sigmaPx))
+    return (0.16f + 0.84f * g).coerceIn(0f, 1f)
+}
 
 @Composable
 fun HomeScreen(onOrganTap: (String) -> Unit) {
+    val attentionCount = remember { OrganRegistry.all.count { !it.statusGood } }
     Column(
         Modifier.fillMaxSize().background(Palette.BgBase).statusBarsPadding()
     ) {
-        // greeting
         Column(Modifier.padding(horizontal = 18.dp, vertical = 10.dp)) {
             Text("Hey, Pranav", style = Type.titleHero, color = Palette.TextPrimary)
             Text(
-                "${OrganRegistry.all.count { !it.statusGood }} areas need a look · pinch to scan",
+                "$attentionCount areas need attention",
                 style = Type.body, color = Palette.TextSecondary
+            )
+            Text(
+                "Recovery 62% · Strain 71 · Readiness 58",
+                style = Type.caption, color = Palette.TextMuted
             )
         }
 
@@ -88,19 +171,32 @@ fun HomeScreen(onOrganTap: (String) -> Unit) {
             onOrganTap = onOrganTap
         )
 
-        BottomNav()
+        HomeFooter()
     }
 }
 
 @Composable
 private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
-    val transition = rememberInfiniteTransition(label = "scan")
-    val rotation by transition.animateFloat(
-        0f, 360f,
-        animationSpec = infiniteRepeatable(tween(20_000, easing = LinearEasing), RepeatMode.Restart),
-        label = "ring"
-    )
     val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    val nodes = remember { buildNodes() }
+
+    // 2D pan offset, in px, as two springable channels.
+    val panX = remember { Animatable(0f) }
+    val panY = remember { Animatable(0f) }
+
+    // gentle breathing phase
+    val infinite = rememberInfiniteTransition(label = "float")
+    val phase by infinite.animateFloat(
+        0f, (2f * PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(6000, easing = LinearEasing), RepeatMode.Restart),
+        label = "phase"
+    )
+    val ringSpin by infinite.animateFloat(
+        0f, 360f,
+        animationSpec = infiniteRepeatable(tween(18000, easing = LinearEasing), RepeatMode.Restart),
+        label = "spin"
+    )
 
     Box(
         modifier
@@ -110,131 +206,238 @@ private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
                     radius = 1100f
                 )
             )
+            .clip(androidx.compose.ui.graphics.RectangleShape)
     ) {
-        // Decoration & organ bubbles via a single Box layout positioning each child.
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            val w = maxWidth
-            val h = maxHeight
+            val wPx = with(density) { maxWidth.toPx() }
+            val hPx = with(density) { maxHeight.toPx() }
+            val centerX = wPx / 2f
+            val centerY = hPx / 2f
+            val sigma = minOf(wPx, hPx) * SIGMA_FRACTION
 
-            // decorations
-            DECORATIONS.forEach { p ->
-                val dx = w * p.xFrac - p.rDp.dp
-                val dy = h * p.yFrac - p.rDp.dp
-                Box(
-                    Modifier
-                        .offset(x = dx, y = dy)
-                        .size((p.rDp * 2).dp)
-                        .background(Palette.BubbleUnfilledFill, shape = androidx.compose.foundation.shape.CircleShape)
-                ) {
-                    Canvas(Modifier.fillMaxSize()) {
-                        drawCircle(
-                            color = Palette.BubbleUnfilledStroke,
-                            style = Stroke(width = 2f)
-                        )
-                    }
+            val pan = Offset(panX.value, panY.value)
+
+            // Which node is closest to dead-centre right now?
+            var focusKey = "you"
+            var focusDist = Float.MAX_VALUE
+            nodes.forEach { n ->
+                val nx = with(density) { n.baseXDp.dp.toPx() }
+                val ny = with(density) { n.baseYDp.dp.toPx() }
+                val d = hypot(nx + pan.x, ny + pan.y)
+                if (n.kind != NodeKind.Decoration && d < focusDist) {
+                    focusDist = d
+                    focusKey = n.key
                 }
             }
 
-            // organs
-            OrganRegistry.all.forEach { organ ->
-                val pos = ORGAN_POS[organ.id] ?: return@forEach
-                val r = pos.rDp.dp
-                val dx = w * pos.xFrac - r
-                val dy = h * pos.yFrac - r
+            val dragModifier = Modifier.pointerInput(Unit) {
+                detectDragGestures(
+                    onDrag = { change, drag ->
+                        change.consume()
+                        scope.launch { panX.snapTo(panX.value + drag.x) }
+                        scope.launch { panY.snapTo(panY.value + drag.y) }
+                    },
+                    onDragEnd = {
+                        // Gravity settle: pull the nearest non-decoration bubble to centre.
+                        val cur = Offset(panX.value, panY.value)
+                        var bestX = 0f
+                        var bestY = 0f
+                        var best = Float.MAX_VALUE
+                        nodes.forEach { n ->
+                            if (n.kind == NodeKind.Decoration) return@forEach
+                            val nx = with(density) { n.baseXDp.dp.toPx() }
+                            val ny = with(density) { n.baseYDp.dp.toPx() }
+                            val d = hypot(nx + cur.x, ny + cur.y)
+                            if (d < best) {
+                                best = d; bestX = -nx; bestY = -ny
+                            }
+                        }
+                        scope.launch {
+                            panX.animateTo(bestX, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
+                        }
+                        scope.launch {
+                            panY.animateTo(bestY, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
+                        }
+                    }
+                )
+            }
 
-                Box(
-                    Modifier
-                        .offset(x = dx, y = dy)
-                        .size(r * 2),
-                    contentAlignment = Alignment.Center
-                ) {
-                    // scanning ring on most-urgent organ
-                    if (organ.id == "heart") {
-                        Canvas(
-                            Modifier
-                                .size(r * 2 + 18.dp)
-                                .rotate(rotation)
-                        ) {
-                            drawCircle(
-                                color = Palette.Heart.copy(alpha = 0.6f),
-                                style = Stroke(
-                                    width = 3f,
-                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 10f), 0f)
-                                )
+            Box(Modifier.fillMaxSize().then(dragModifier)) {
+                nodes.forEach { node ->
+                    val baseX = with(density) { node.baseXDp.dp.toPx() }
+                    val baseY = with(density) { node.baseYDp.dp.toPx() }
+
+                    // breathing wobble (skipped for YOU so the centre stays stable)
+                    val seed = node.key.hashCode() % 360
+                    val wob = if (node.kind == NodeKind.You) 0f else FLOAT_AMP_PX
+                    val fx = sin(phase + seed) * wob
+                    val fy = cos(phase * 0.9f + seed) * wob
+
+                    val cx = centerX + baseX + pan.x + fx
+                    val cy = centerY + baseY + pan.y + fy
+
+                    val dist = hypot(cx - centerX, cy - centerY)
+                    val scale = fisheyeScale(dist, sigma)
+                    val alpha = fisheyeAlpha(dist, sigma)
+
+                    // cull bubbles that have shrunk to nothing or wandered off-screen
+                    val rPx = with(density) { node.baseRadiusDp.dp.toPx() } * scale
+                    if (alpha < 0.04f) return@forEach
+                    if (cx < -rPx || cy < -rPx || cx > wPx + rPx || cy > hPx + rPx) return@forEach
+
+                    val isFocused = node.key == focusKey
+                    val focusBoost = if (isFocused && node.kind == NodeKind.Organ) 1.12f else 1f
+
+                    val topLeftX = (cx - with(density) { node.baseRadiusDp.dp.toPx() }).roundToInt()
+                    val topLeftY = (cy - with(density) { node.baseRadiusDp.dp.toPx() }).roundToInt()
+
+                    Box(
+                        Modifier
+                            .offset { IntOffset(topLeftX, topLeftY) }
+                            .size(node.baseRadiusDp.dp * 2)
+                            .graphicsLayer {
+                                scaleX = scale * focusBoost
+                                scaleY = scale * focusBoost
+                                this.alpha = alpha
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        when (node.kind) {
+                            NodeKind.You -> YouBubble()
+                            NodeKind.Decoration -> DecorationBubble()
+                            NodeKind.Organ -> OrganBubble(
+                                organ = node.organ!!,
+                                focused = isFocused,
+                                spin = ringSpin,
+                                onTap = {
+                                    if (isFocused) {
+                                        onOrganTap(node.organ.id)
+                                    } else {
+                                        scope.launch {
+                                            panX.animateTo(-baseX, spring(Spring.DampingRatioLowBouncy, Spring.StiffnessLow))
+                                        }
+                                        scope.launch {
+                                            panY.animateTo(-baseY, spring(Spring.DampingRatioLowBouncy, Spring.StiffnessLow))
+                                        }
+                                    }
+                                }
                             )
                         }
                     }
+                }
 
-                    Box(
+                // Focused organ caption, anchored to the bottom of the cluster.
+                val focused = nodes.firstOrNull { it.key == focusKey }?.organ
+                if (focused != null) {
+                    Column(
                         Modifier
-                            .size(r * 2)
-                            .background(organ.accent, shape = androidx.compose.foundation.shape.CircleShape)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) { onOrganTap(organ.id) },
-                        contentAlignment = Alignment.Center
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 8.dp)
+                            .fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        OrganAssetIcon(
-                            organId = organ.id,
-                            contentDescription = organ.displayName,
-                            modifier = Modifier
-                                .size(r * 1.2f)
-                                .padding(8.dp)
+                        Text(focused.displayName, style = Type.tinyBold, color = Palette.TextPrimary)
+                        Text(
+                            focused.previewSummary,
+                            style = Type.caption,
+                            color = Palette.TextSecondary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 2.dp)
                         )
                     }
                 }
-
-                if (organ.id == "heart") {
-                    // label below heart bubble
-                    val labelY = h * pos.yFrac + r + 6.dp
-                    Box(
-                        Modifier
-                            .offset(x = w * pos.xFrac - 28.dp, y = labelY)
-                            .width(56.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("Heart", style = Type.tinyBold, color = Palette.TextPrimary)
-                    }
-                }
             }
+        }
+    }
+}
 
-            // footer hint
-            Text(
-                "tap a bubble to scan in",
-                style = Type.caption,
-                color = Palette.TextSecondary,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 10.dp)
+@Composable
+private fun YouBubble() {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Palette.Surface, CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            drawCircle(color = Palette.Border, style = Stroke(width = 2f))
+        }
+        Text("YOU", style = Type.label, color = Palette.TextPrimary)
+    }
+}
+
+@Composable
+private fun DecorationBubble() {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Palette.BubbleUnfilledFill, CircleShape)
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            drawCircle(color = Palette.BubbleUnfilledStroke, style = Stroke(width = 2f))
+        }
+    }
+}
+
+@Composable
+private fun OrganBubble(
+    organ: OrganNode,
+    focused: Boolean,
+    spin: Float,
+    onTap: () -> Unit,
+) {
+    Box(contentAlignment = Alignment.Center) {
+        // animated scan ring on the focused, needs-attention organ
+        if (focused && !organ.statusGood) {
+            Canvas(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        rotationZ = spin
+                        scaleX = 1.16f
+                        scaleY = 1.16f
+                    }
+            ) {
+                drawCircle(
+                    color = organ.accent.copy(alpha = 0.6f),
+                    style = Stroke(
+                        width = 3f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 10f), 0f)
+                    )
+                )
+            }
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(organ.accent, CircleShape)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { onTap() },
+            contentAlignment = Alignment.Center
+        ) {
+            OrganAssetIcon(
+                organId = organ.id,
+                contentDescription = organ.displayName,
+                modifier = Modifier.fillMaxSize().padding(12.dp)
             )
         }
     }
 }
 
 @Composable
-private fun BottomNav() {
-    Row(
+private fun HomeFooter() {
+    Column(
         Modifier
             .fillMaxWidth()
             .background(Palette.BgBase)
-            .padding(top = 12.dp, bottom = 18.dp)
+            .padding(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 16.dp)
             .navigationBarsPadding(),
-        horizontalArrangement = Arrangement.SpaceEvenly
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        NavItem(Icons.Outlined.GridView, "Body", active = true)
-        NavItem(Icons.Outlined.ShowChart, "Trends")
-        NavItem(Icons.Outlined.Add, "Log")
-        NavItem(Icons.Outlined.Menu, "More")
-    }
-}
-
-@Composable
-private fun NavItem(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, active: Boolean = false) {
-    val tint = if (active) Palette.TextPrimary else Palette.TextMuted
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(20.dp))
-        Spacer(Modifier.height(2.dp))
-        Text(label, style = Type.caption, color = tint)
+        Text("Tap a bubble to open details", style = Type.bodySmall, color = Palette.TextPrimary)
+        Text("RHR 64 (+6) · HRV 42 (-8) · Sleep 6h44m", style = Type.caption, color = Palette.TextSecondary)
+        Text("Hydration 61% · VO₂ 46 · Focus 72", style = Type.caption, color = Palette.TextMuted)
     }
 }

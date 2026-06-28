@@ -9,14 +9,11 @@ import androidx.navigation.navArgument
 import com.health.secondbrain.ui.screens.ChatScreen
 import com.health.secondbrain.ui.screens.HomeScreen
 import com.health.secondbrain.ui.screens.OrganDetailScreen
-import com.health.secondbrain.ui.screens.ScanFocusScreen
 
 object Routes {
     const val Home = "home"
-    const val Scan = "scan/{organId}"
     const val Detail = "detail/{organId}"
     const val Chat = "chat/{organId}"
-    fun scan(id: String) = "scan/$id"
     fun detail(id: String) = "detail/$id"
     fun chat(id: String) = "chat/$id"
 }
@@ -26,18 +23,7 @@ fun AppRoot() {
     val nav = rememberNavController()
     NavHost(navController = nav, startDestination = Routes.Home) {
         composable(Routes.Home) {
-            HomeScreen(onOrganTap = { nav.navigate(Routes.scan(it)) })
-        }
-        composable(
-            Routes.Scan,
-            arguments = listOf(navArgument("organId") { type = NavType.StringType })
-        ) {
-            val id = it.arguments?.getString("organId") ?: "heart"
-            ScanFocusScreen(
-                organId = id,
-                onClose = { nav.popBackStack() },
-                onOpenDetails = { nav.navigate(Routes.detail(id)) }
-            )
+            HomeScreen(onOrganTap = { nav.navigate(Routes.detail(it)) })
         }
         composable(
             Routes.Detail,
