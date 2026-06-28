@@ -15,6 +15,7 @@ android {
         targetSdk = 33
         versionCode = 1
         versionName = "0.1.0"
+        manifestPlaceholders["appLabel"] = "Second Brain"
 
         // Snapdragon 8 Elite (SM8750) — arm64 only is fine for the S25 Ultra
         ndk { abiFilters += listOf("arm64-v8a") }
@@ -24,6 +25,15 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        create("uiTest") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".uitest"
+            versionNameSuffix = "-uitest"
+            isDebuggable = true
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("debug")
+            manifestPlaceholders["appLabel"] = "HALO UI Test"
         }
     }
 
