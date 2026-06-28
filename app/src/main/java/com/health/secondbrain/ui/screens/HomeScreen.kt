@@ -173,6 +173,7 @@ fun HomeScreen(
     footerSecondary: String = "Waiting for component metrics",
     onModeChange: (HealthBackendMode) -> Unit = {},
     onOrganTap: (String) -> Unit,
+    onYouTap: () -> Unit = {},
 ) {
     val attentionCount = remember(organs) { organs.count { !it.statusGood } }
     Column(
@@ -206,7 +207,8 @@ fun HomeScreen(
             organs = organs,
             overviewStats = overviewStats,
             overviewNote = overviewNote,
-            onOrganTap = onOrganTap
+            onOrganTap = onOrganTap,
+            onYouTap = onYouTap
         )
 
         HomeFooter(footerPrimary = footerPrimary, footerSecondary = footerSecondary)
@@ -240,6 +242,7 @@ private fun BubbleCluster(
     overviewStats: List<Metric>,
     overviewNote: String,
     onOrganTap: (String) -> Unit,
+    onYouTap: () -> Unit = {},
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
@@ -370,7 +373,9 @@ private fun BubbleCluster(
                             NodeKind.You -> YouBubble(
                                 focused = isFocused,
                                 onTap = {
-                                    if (!isFocused) {
+                                    if (isFocused) {
+                                        onYouTap()
+                                    } else {
                                         scope.launch {
                                             panX.animateTo(-baseX, spring(Spring.DampingRatioLowBouncy, Spring.StiffnessLow))
                                         }

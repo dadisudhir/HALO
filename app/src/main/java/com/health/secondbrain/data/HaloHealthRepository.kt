@@ -18,6 +18,24 @@ class HaloHealthRepository(context: Context) {
     private val fakeSource = FakeHealthDataSource()
     private val realSource = RealHealthDataSource()
 
+    suspend fun loadUserProfile(): UserProfile = withContext(Dispatchers.IO) {
+        UserProfile(
+            displayName = "You",
+            memberLabel = "HALO health profile",
+            avatarInitials = "YOU",
+            statusLabel = "Active",
+            lastUpdatedText = "Updated just now",
+        )
+    }
+
+    suspend fun loadUserPreferences(): UserPreferences = withContext(Dispatchers.IO) {
+        UserPreferences(
+            preferredUnits = "US units",
+            remindersEnabled = true,
+            dataSharingLabel = "Local SQLite + optional FHIR",
+        )
+    }
+
     suspend fun loadDashboard(mode: HealthBackendMode): HealthDashboardUiState =
         withContext(Dispatchers.IO) {
             val writable = database.writableDatabase

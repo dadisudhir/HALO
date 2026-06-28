@@ -1,12 +1,14 @@
 package com.health.secondbrain.ui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -18,9 +20,12 @@ import com.health.secondbrain.health.HealthDashboardUiState
 import com.health.secondbrain.ui.screens.ChatScreen
 import com.health.secondbrain.ui.screens.HomeScreen
 import com.health.secondbrain.ui.screens.OrganDetailScreen
+import com.health.secondbrain.ui.screens.YouScreen
+import com.health.secondbrain.ui.screens.YouScreenViewModel
 
 object Routes {
     const val Home = "home"
+    const val You = "you"
     const val Detail = "detail/{organId}"
     const val Chat = "chat/{organId}"
     fun detail(id: String) = "detail/$id"
@@ -51,6 +56,20 @@ fun AppRoot() {
                 footerSecondary = dashboard.footerSecondary,
                 onModeChange = { mode = it },
                 onOrganTap = { nav.navigate(Routes.detail(it)) },
+                onYouTap = { nav.navigate(Routes.You) },
+            )
+        }
+        composable(Routes.You) {
+            val youViewModel: YouScreenViewModel = viewModel(
+                factory = YouScreenViewModel.Factory(repository)
+            )
+            LaunchedEffect(mode, dashboard.backendStatus) {
+                youViewModel.load(mode, dashboard)
+            }
+            YouScreen(
+                state = youViewModel.uiState,
+                onBack = { nav.popBackStack() },
+                onModeChange = { mode = it },
             )
         }
         composable(

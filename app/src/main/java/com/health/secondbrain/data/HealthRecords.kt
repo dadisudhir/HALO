@@ -8,6 +8,20 @@ enum class HealthBackendMode {
     Real,
 }
 
+data class UserProfile(
+    val displayName: String,
+    val memberLabel: String,
+    val avatarInitials: String,
+    val statusLabel: String,
+    val lastUpdatedText: String,
+)
+
+data class UserPreferences(
+    val preferredUnits: String,
+    val remindersEnabled: Boolean,
+    val dataSharingLabel: String,
+)
+
 data class DailyHealthSummary(
     val day: LocalDate,
     val restingBpm: Double,
