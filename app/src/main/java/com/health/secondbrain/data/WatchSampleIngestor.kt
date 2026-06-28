@@ -108,6 +108,7 @@ class WatchSampleIngestor {
             patch.sleepEfficiency = sample.efficiency ?: patch.sleepEfficiency
         }
         if (days.isEmpty()) {
+            if (payload.steps == null && payload.hrvRmssd == null && payload.hydrationPercent == null) return 0
             days[payload.capturedAt.toLocalDateString()] = DailyPatch(day = payload.capturedAt.toLocalDateString())
         }
 

@@ -48,6 +48,20 @@ class WatchPacketReceiver : BroadcastReceiver() {
             ?: intent.getStringExtra("payload")
             ?: intent.getStringExtra("json")
         if (!raw.isNullOrBlank()) return raw
+        intent.getStringExtra("samples_json")?.takeIf { it.isNotBlank() }?.let { samplesJson ->
+            val samples = JSONTokener(samplesJson).nextValue().let { value ->
+                when (value) {
+                    is JSONArray -> value
+                    is JSONObject -> value.optJSONArray("samples") ?: JSONArray().put(value)
+                    else -> JSONArray()
+                }
+            }
+            return JSONObject()
+                .put("source", intent.getStringExtra("source") ?: "watch_json_live")
+                .put("captured_at", intent.getStringExtra("captured_at"))
+                .put("samples", samples)
+                .toString()
+        }
         return extrasToJson(intent.extras).toString()
     }
 

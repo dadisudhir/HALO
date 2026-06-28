@@ -21,7 +21,7 @@ class WatchJsonDataSource {
         val payloadType = when {
             root.has("samsungHealthVersion") || root.has("heartRate") || root.has("irregularRhythm") ->
                 "samsung_health_export"
-            root.has("samples") || root.has("ecg") -> "ecg_packet"
+            root.has("ecg") || root.optJSONArray("samples")?.containsEcgRows() == true -> "ecg_packet"
             else -> "watch_json"
         }
         val liveSource = normalizeLiveSource(
@@ -54,9 +54,18 @@ class WatchJsonDataSource {
             heartSamples = heartSamples,
             sleepSamples = sleepSamples,
             irregularRhythmEvents = irregularRhythmEvents,
-            restingBpm = root.optNumber("resting_hr_bpm") ?: root.optNumber("restingBpm"),
-            hrvRmssd = root.optNumber("hrv_rmssd") ?: root.optNumber("hrvRmssd"),
-            steps = root.optNumber("steps")?.toInt() ?: root.optNumber("daily_steps")?.toInt(),
+            restingBpm = root.optNumber("resting_hr_bpm")
+                ?: root.optNumber("restingBpm")
+                ?: root.latestSampleNumber("resting_hr_bpm")
+                ?: root.latestSampleNumber("restingBpm"),
+            hrvRmssd = root.optNumber("hrv_rmssd")
+                ?: root.optNumber("hrvRmssd")
+                ?: root.latestSampleNumber("hrv_rmssd")
+                ?: root.latestSampleNumber("hrvRmssd"),
+            steps = root.optNumber("steps")?.toInt()
+                ?: root.optNumber("daily_steps")?.toInt()
+                ?: root.latestSampleNumber("steps")?.toInt()
+                ?: root.latestSampleNumber("daily_steps")?.toInt(),
             hydrationPercent = root.optNumber("hydration_percent") ?: root.optNumber("hydrationPercent"),
             ecgPacket = ecgPacket,
         )
@@ -89,6 +98,22 @@ class WatchJsonDataSource {
                 )
             }
         }
+        root.optJSONArray("samples")?.forEachObject { row ->
+            val bpm = row.optNumber("heart_rate_bpm")
+                ?: row.optNumber("heartRateBpm")
+                ?: row.optNumber("heartRate")
+                ?: row.optNumber("bpm")
+            if (bpm != null) {
+                samples += HeartRateSample(
+                    time = parseInstantOrNull(
+                        row.optNullableString("timestamp")
+                            ?: row.optNullableString("time")
+                            ?: row.optNullableString("sampleTime")
+                    ) ?: capturedAt,
+                    bpm = bpm,
+                )
+            }
+        }
         return samples
     }
 
@@ -106,6 +131,21 @@ class WatchJsonDataSource {
                 hours = minutes?.div(60.0),
                 efficiency = row.optNumber("sleepScore") ?: row.optNumber("sleepEfficiency"),
             )
+        }
+        root.optJSONArray("samples")?.forEachObject { row ->
+            val hours = row.optNumber("sleep_hours") ?: row.optNumber("sleepHours")
+            val efficiency = row.optNumber("sleep_efficiency") ?: row.optNumber("sleepEfficiency")
+            if (hours != null || efficiency != null) {
+                samples += SleepSample(
+                    time = parseInstantOrNull(
+                        row.optNullableString("timestamp")
+                            ?: row.optNullableString("time")
+                            ?: row.optNullableString("sampleTime")
+                    ) ?: capturedAt,
+                    hours = hours,
+                    efficiency = efficiency,
+                )
+            }
         }
         return samples
     }
@@ -129,7 +169,12 @@ class WatchJsonDataSource {
 
     private fun parseEcgPacket(root: JSONObject, source: String, capturedAt: Instant): EcgPacket? {
         val ecg = root.optJSONObject("ecg")
-        val sampleArray = root.optJSONArray("samples") ?: ecg?.optJSONArray("samples") ?: return null
+        val rootSamples = root.optJSONArray("samples")
+        val sampleArray = when {
+            ecg?.optJSONArray("samples") != null -> ecg.optJSONArray("samples")
+            rootSamples?.containsEcgRows() == true -> rootSamples
+            else -> null
+        } ?: return null
         val samplingHz = root.optNumber("sampling_hz")
             ?: root.optNumber("samplingHz")
             ?: ecg?.optNumber("sampling_hz")
@@ -250,6 +295,32 @@ private fun JSONObject.optBooleanFlexible(name: String): Boolean? {
         is String -> value.equals("true", true) || value == "1" || value.equals("yes", true)
         else -> null
     }
+}
+
+private fun JSONObject.latestSampleNumber(name: String): Double? {
+    val samples = optJSONArray("samples") ?: return null
+    for (index in samples.length() - 1 downTo 0) {
+        val value = samples.optJSONObject(index)?.optNumber(name)
+        if (value != null) return value
+    }
+    return null
+}
+
+private fun JSONArray.containsEcgRows(): Boolean {
+    for (index in 0 until length()) {
+        val row = optJSONObject(index) ?: continue
+        if (row.has("ecgMv") ||
+            row.has("ecg_mv") ||
+            row.has("mv") ||
+            row.has("elapsedMs") ||
+            row.has("elapsed_ms") ||
+            row.has("leadOff") ||
+            row.has("lead_off")
+        ) {
+            return true
+        }
+    }
+    return false
 }
 
 private inline fun JSONArray.forEachObject(block: (JSONObject) -> Unit) {
