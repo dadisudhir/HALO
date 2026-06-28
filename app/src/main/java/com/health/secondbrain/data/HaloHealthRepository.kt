@@ -56,13 +56,29 @@ class HaloHealthRepository(context: Context) {
             val summaries = readDailySummaries(writable)
             val prediction = HealthRiskEngine.score(summaries)
             persistPrediction(writable, prediction)
-            val dashboard = HealthDashboardMapper.from(components, summaries, prediction, mode, fhirImport)
+            val watchSnapshot = readLatestWatchSnapshot(writable)
+            val ecgSummary = readLatestEcgSummary(writable)
+            val dashboard = HealthDashboardMapper.from(
+                components = components,
+                summaries = summaries,
+                prediction = prediction,
+                mode = mode,
+                fhirImport = fhirImport,
+                watchSnapshot = watchSnapshot,
+                ecgSummary = ecgSummary,
+            )
             val activeAlert = readActiveAlert(writable)
+            val watchStatus = watchSnapshot?.let {
+                " - watch current ${it.currentBpm?.toInt() ?: "n/a"} bpm resting ${it.restingBpm?.toInt() ?: "n/a"}"
+            }.orEmpty()
+            val ecgStatus = ecgSummary?.let {
+                " - ECG ${it.sampleCount} samples ${it.samplingHz?.let { hz -> "${hz.toInt()}Hz" } ?: "hz n/a"}"
+            }.orEmpty()
             if (activeAlert == null) {
-                dashboard
+                dashboard.copy(backendStatus = "${dashboard.backendStatus}$watchStatus$ecgStatus")
             } else {
                 dashboard.copy(
-                    backendStatus = "${dashboard.backendStatus} - active ${activeAlert.alertType} ${activeAlert.severity}",
+                    backendStatus = "${dashboard.backendStatus}$watchStatus$ecgStatus - active ${activeAlert.alertType} ${activeAlert.severity}",
                 )
             }
         }
@@ -299,6 +315,101 @@ class HaloHealthRepository(context: Context) {
         }
     }
 
+    private fun readLatestWatchSnapshot(db: SQLiteDatabase): WatchSnapshotSummary? {
+        val cursor = db.query(
+            "watch_json_batches",
+            arrayOf("received_at", "source", "raw_json"),
+            null,
+            null,
+            null,
+            null,
+            "received_at DESC",
+            "20",
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                val receivedAt = Instant.parse(it.getString(0))
+                val source = it.getString(1)
+                val rawJson = it.getString(2)
+                val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: continue
+                val currentBpm = root.optDoubleOrNull("heart_rate_bpm")
+                    ?: root.optDoubleOrNull("heartRateBpm")
+                    ?: root.optJSONObject("heartRate")?.optDoubleOrNull("latestBpm")
+                val restingBpm = root.optDoubleOrNull("resting_hr_bpm")
+                    ?: root.optDoubleOrNull("restingBpm")
+                val hrv = root.optDoubleOrNull("hrv_rmssd") ?: root.optDoubleOrNull("hrvRmssd")
+                if (currentBpm == null && restingBpm == null && hrv == null) continue
+                val capturedAt = parseInstantOrNull(
+                    root.optString("captured_at").takeIf { value -> value.isNotBlank() }
+                        ?: root.optString("capturedAt").takeIf { value -> value.isNotBlank() }
+                ) ?: receivedAt
+                return WatchSnapshotSummary(
+                    currentBpm = currentBpm,
+                    restingBpm = restingBpm,
+                    hrvRmssd = hrv,
+                    capturedAt = capturedAt,
+                    source = source,
+                    event = summarizeWatchJson(rawJson),
+                )
+            }
+            return null
+        }
+    }
+
+    private fun readLatestEcgSummary(db: SQLiteDatabase): EcgSessionSummary? {
+        val sessionCursor = db.query(
+            "ecg_sessions",
+            arrayOf("session_id", "sample_count", "sampling_hz", "lead_off_count", "last_received_at"),
+            null,
+            null,
+            null,
+            null,
+            "last_received_at DESC",
+            "1",
+        )
+        sessionCursor.use {
+            if (!it.moveToFirst()) return null
+            val sessionId = it.getString(0)
+            val sampleCount = it.getInt(1)
+            val samplingHz = if (it.isNull(2)) null else it.getDouble(2)
+            val leadOffCount = it.getInt(3)
+            val lastReceivedAt = Instant.parse(it.getString(4))
+            val sampleStats = readEcgSampleStats(db, sessionId)
+            return EcgSessionSummary(
+                sessionId = sessionId,
+                sampleCount = sampleCount,
+                samplingHz = samplingHz,
+                latestMv = sampleStats.latestMv,
+                minMv = sampleStats.minMv,
+                maxMv = sampleStats.maxMv,
+                leadOffCount = leadOffCount,
+                lastReceivedAt = lastReceivedAt,
+            )
+        }
+    }
+
+    private fun readEcgSampleStats(db: SQLiteDatabase, sessionId: String): EcgSampleStats {
+        val cursor = db.rawQuery(
+            """
+            SELECT
+                (SELECT ecg_mv FROM ecg_samples WHERE session_id = ? AND ecg_mv IS NOT NULL ORDER BY received_at DESC, id DESC LIMIT 1),
+                MIN(ecg_mv),
+                MAX(ecg_mv)
+            FROM ecg_samples
+            WHERE session_id = ?
+            """.trimIndent(),
+            arrayOf(sessionId, sessionId),
+        )
+        cursor.use {
+            if (!it.moveToFirst()) return EcgSampleStats()
+            return EcgSampleStats(
+                latestMv = if (it.isNull(0)) null else it.getDouble(0),
+                minMv = if (it.isNull(1)) null else it.getDouble(1),
+                maxMv = if (it.isNull(2)) null else it.getDouble(2),
+            )
+        }
+    }
+
     private fun summarizeWatchJson(rawJson: String): String {
         val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: return "watch packet received"
         val parts = buildList {
@@ -363,6 +474,11 @@ class HaloHealthRepository(context: Context) {
             else -> null
         }
 
+    private fun parseInstantOrNull(value: String?): Instant? {
+        if (value.isNullOrBlank()) return null
+        return runCatching { Instant.parse(value) }.getOrNull()
+    }
+
     private fun persistPrediction(db: SQLiteDatabase, prediction: RiskPrediction) {
         val featureId = db.insert(
             "feature_vectors",
@@ -385,4 +501,10 @@ class HaloHealthRepository(context: Context) {
             }
         )
     }
+
+    private data class EcgSampleStats(
+        val latestMv: Double? = null,
+        val minMv: Double? = null,
+        val maxMv: Double? = null,
+    )
 }

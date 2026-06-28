@@ -2,10 +2,12 @@ package com.health.secondbrain.health
 
 import androidx.compose.ui.graphics.Color
 import com.health.secondbrain.data.DailyHealthSummary
+import com.health.secondbrain.data.EcgSessionSummary
 import com.health.secondbrain.data.FhirImportResult
 import com.health.secondbrain.data.HealthBackendMode
 import com.health.secondbrain.data.HealthComponentDefinition
 import com.health.secondbrain.data.RiskPrediction
+import com.health.secondbrain.data.WatchSnapshotSummary
 import com.health.secondbrain.features.HealthInterpolator
 import com.health.secondbrain.features.HealthRiskEngine
 import com.health.secondbrain.model.DeltaDirection
@@ -47,6 +49,8 @@ object HealthDashboardMapper {
         prediction: RiskPrediction,
         mode: HealthBackendMode,
         fhirImport: FhirImportResult?,
+        watchSnapshot: WatchSnapshotSummary? = null,
+        ecgSummary: EcgSessionSummary? = null,
     ): HealthDashboardUiState {
         if (summaries.isEmpty()) return HealthDashboardUiState.Loading.copy(backendStatus = "empty summaries")
         if (components.isEmpty()) return HealthDashboardUiState.Loading.copy(backendStatus = "empty components")
@@ -68,7 +72,7 @@ object HealthDashboardMapper {
             .filter { it.enabled && it.iconAsset.isNotBlank() }
             .map { component ->
                 when (component.id) {
-                    "heart" -> heartOrgan(component, summaries, prediction, latest, deltaResting, deltaHrv)
+                    "heart" -> heartOrgan(component, summaries, prediction, latest, deltaResting, deltaHrv, watchSnapshot, ecgSummary)
                     "sleep" -> sleepOrgan(component, summaries, prediction, latest, deltaSleep)
                     "brain" -> brainOrgan(component, summaries, latest, deltaHrv)
                     "liver" -> liverOrgan(component, summaries, latest, fhirImport)
@@ -168,27 +172,62 @@ object HealthDashboardMapper {
         latest: DailyHealthSummary,
         deltaResting: Double,
         deltaHrv: Double,
+        watchSnapshot: WatchSnapshotSummary?,
+        ecgSummary: EcgSessionSummary?,
     ): OrganNode {
         val needsAttention = prediction.arrhythmiaScore > 0.42 || prediction.cardiacDecompScore > 0.42
+        val currentBpm = watchSnapshot?.currentBpm
+        val restingBpm = watchSnapshot?.restingBpm ?: latest.restingBpm
+        val hrv = watchSnapshot?.hrvRmssd ?: latest.hrvRmssd
+        val baselineResting = latest.restingBpm - deltaResting
+        val baselineHrv = latest.hrvRmssd - deltaHrv
+        val watchLine = watchSnapshot?.let {
+            "Watch live: Current BPM ${currentBpm?.roundToInt() ?: "n/a"}, resting HR ${restingBpm.roundToInt()}, source ${it.source}."
+        } ?: "Watch live BPM has not been received yet."
+        val ecgLine = ecgSummary?.let {
+            val hz = it.samplingHz?.let { value -> "${value.roundToInt()} Hz" } ?: "sampling Hz n/a"
+            val range = if (it.minMv != null && it.maxMv != null) {
+                "range ${formatMv(it.minMv)} to ${formatMv(it.maxMv)}"
+            } else {
+                "mV range n/a"
+            }
+            "ECG ${it.sessionId}: ${it.sampleCount} samples at $hz, latest ${formatOptionalMv(it.latestMv)}, $range, lead-off ${it.leadOffCount}."
+        } ?: "ECG packets have not been received yet."
         return baseOrgan(
             component = component,
             attentionScore = (0.58f + prediction.cardiacDecompScore.toFloat()).coerceIn(0.35f, 1.0f),
             metrics = listOf(
-                Metric("Resting HR", latest.restingBpm.roundToInt().toString(), formatDelta(deltaResting, "bpm"), deltaDirection(deltaResting, upIsBad = true)),
-                Metric("HRV", latest.hrvRmssd.roundToInt().toString(), formatDelta(deltaHrv, ""), deltaDirection(deltaHrv, upIsBad = false)),
+                Metric(
+                    "Current BPM",
+                    currentBpm?.roundToInt()?.toString() ?: latest.averageHeartRate.roundToInt().toString(),
+                    if (watchSnapshot != null) "live" else "avg",
+                    DeltaDirection.UpBad,
+                ),
+                Metric(
+                    "Resting HR",
+                    restingBpm.roundToInt().toString(),
+                    formatDelta(restingBpm - baselineResting, "bpm"),
+                    deltaDirection(restingBpm - baselineResting, upIsBad = true),
+                ),
+                Metric(
+                    "HRV",
+                    hrv.roundToInt().toString(),
+                    formatDelta(hrv - baselineHrv, ""),
+                    deltaDirection(hrv - baselineHrv, upIsBad = false),
+                ),
             ),
             chart7Day = HealthInterpolator.sevenDay(summaries.map { it.restingBpm }, latest.restingBpm),
             activeZones = HealthInterpolator.sevenDay(summaries.map { it.averageHeartRate - 58.0 }, 20.0),
-            sentenceWeek = "Cardiac risk is ${percent(prediction.cardiacDecompScore)} with resting HR ${formatSigned(deltaResting)} bpm from baseline.",
-            sentenceMonth = "The backend stores baseline/current windows and writes every risk run into SQLite.",
+            sentenceWeek = "$watchLine Cardiac risk is ${percent(prediction.cardiacDecompScore)}.",
+            sentenceMonth = ecgLine,
             sentenceNextStep = if (needsAttention) {
                 "Keep today easy and prioritize sleep until resting HR returns toward baseline."
             } else {
                 "Cardiac signals are inside the current MVP guardrails."
             },
             statusGood = !needsAttention,
-            previewSummary = "Cardiac ${percent(prediction.cardiacDecompScore)}, arrhythmia ${percent(prediction.arrhythmiaScore)}.",
-            chatChips = listOf("Explain my risk score", "What changed today?"),
+            previewSummary = "${watchSnapshot?.event ?: "Cardiac ${percent(prediction.cardiacDecompScore)}"}, ${ecgSummary?.sampleCount ?: 0} ECG samples.",
+            chatChips = listOf("Explain my risk score", "What changed today?", "Show ECG evidence"),
         )
     }
 
@@ -399,6 +438,12 @@ object HealthDashboardMapper {
 
     private fun formatOptionalDelta(delta: Double?, unit: String): String =
         delta?.let { formatDelta(it, unit) } ?: "-"
+
+    private fun formatOptionalMv(value: Double?): String =
+        value?.let { formatMv(it) } ?: "mV n/a"
+
+    private fun formatMv(value: Double): String =
+        "${String.format("%.3f", value)} mV"
 
     private fun formatSigned(delta: Double): String {
         val rounded = delta.roundToInt()

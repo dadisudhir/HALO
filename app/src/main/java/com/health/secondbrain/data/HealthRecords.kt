@@ -116,3 +116,23 @@ data class SignalChangeSummary(
     val source: String,
     val description: String,
 )
+
+data class WatchSnapshotSummary(
+    val currentBpm: Double?,
+    val restingBpm: Double?,
+    val hrvRmssd: Double?,
+    val capturedAt: Instant,
+    val source: String,
+    val event: String,
+)
+
+data class EcgSessionSummary(
+    val sessionId: String,
+    val sampleCount: Int,
+    val samplingHz: Double?,
+    val latestMv: Double?,
+    val minMv: Double?,
+    val maxMv: Double?,
+    val leadOffCount: Int,
+    val lastReceivedAt: Instant,
+)
