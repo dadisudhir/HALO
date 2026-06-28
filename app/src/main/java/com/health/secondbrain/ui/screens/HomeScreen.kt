@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.health.secondbrain.model.OrganNode
 import com.health.secondbrain.model.OrganRegistry
+import com.health.secondbrain.ui.components.OrganAssetIcon
 import com.health.secondbrain.ui.theme.Palette
 import com.health.secondbrain.ui.theme.Type
 import kotlin.math.roundToInt
@@ -174,10 +175,12 @@ private fun BubbleCluster(modifier: Modifier, onOrganTap: (String) -> Unit) {
                             ) { onOrganTap(organ.id) },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = organIconChar(organ.id),
-                            color = Color.White,
-                            fontSize = (pos.rDp * 0.8f).sp
+                        OrganAssetIcon(
+                            organId = organ.id,
+                            contentDescription = organ.displayName,
+                            modifier = Modifier
+                                .size(r * 1.2f)
+                                .padding(8.dp)
                         )
                     }
                 }
@@ -234,15 +237,4 @@ private fun NavItem(icon: androidx.compose.ui.graphics.vector.ImageVector, label
         Spacer(Modifier.height(2.dp))
         Text(label, style = Type.caption, color = tint)
     }
-}
-
-private fun organIconChar(id: String): String = when (id) {
-    "heart"  -> "❤"
-    "liver"  -> "◆"
-    "gut"    -> "◉"
-    "sleep"  -> "☾"
-    "lungs"  -> "▲"
-    "kidney" -> "◈"
-    "brain"  -> "✷"
-    else -> "●"
 }

@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.health.secondbrain.model.OrganRegistry
+import com.health.secondbrain.ui.components.OrganAssetIcon
 import com.health.secondbrain.ui.theme.Palette
 import com.health.secondbrain.ui.theme.Type
 
@@ -119,10 +120,12 @@ fun ScanFocusScreen(
                     .border(2.dp, organ.accent, CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = organIconChar(organ.id),
-                    color = organ.accent,
-                    fontSize = 46.sp
+                OrganAssetIcon(
+                    organId = organ.id,
+                    contentDescription = organ.displayName,
+                    modifier = Modifier
+                        .size(80.dp)
+                        .padding(8.dp)
                 )
             }
         }
@@ -179,15 +182,4 @@ fun ScanFocusScreen(
             }
         }
     }
-}
-
-private fun organIconChar(id: String): String = when (id) {
-    "heart"  -> "❤"
-    "liver"  -> "◆"
-    "gut"    -> "◉"
-    "sleep"  -> "☾"
-    "lungs"  -> "▲"
-    "kidney" -> "◈"
-    "brain"  -> "✷"
-    else -> "●"
 }

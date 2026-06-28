@@ -21,6 +21,7 @@ import com.health.secondbrain.model.Metric
 import com.health.secondbrain.model.OrganNode
 import com.health.secondbrain.model.OrganRegistry
 import com.health.secondbrain.ui.components.LineSpark
+import com.health.secondbrain.ui.components.OrganAssetIcon
 import com.health.secondbrain.ui.components.WeekBars
 import com.health.secondbrain.ui.theme.Palette
 import com.health.secondbrain.ui.theme.Type
@@ -100,10 +101,12 @@ private fun Hero(organ: OrganNode) {
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                organIconChar(organ.id),
-                color = organ.accent,
-                fontSize = 72.sp
+            OrganAssetIcon(
+                organId = organ.id,
+                contentDescription = organ.displayName,
+                modifier = Modifier
+                    .size(96.dp)
+                    .padding(6.dp)
             )
             Spacer(Modifier.height(6.dp))
             Text(
@@ -265,15 +268,4 @@ private fun ChatEntryPanel(organ: OrganNode, onOpenChat: () -> Unit) {
             }
         }
     }
-}
-
-private fun organIconChar(id: String): String = when (id) {
-    "heart"  -> "❤"
-    "liver"  -> "◆"
-    "gut"    -> "◉"
-    "sleep"  -> "☾"
-    "lungs"  -> "▲"
-    "kidney" -> "◈"
-    "brain"  -> "✷"
-    else -> "●"
 }

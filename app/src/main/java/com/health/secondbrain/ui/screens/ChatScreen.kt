@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.health.secondbrain.llm.OnDeviceLlmService
 import com.health.secondbrain.model.OrganRegistry
+import com.health.secondbrain.ui.components.OrganAssetIcon
 import com.health.secondbrain.ui.theme.Palette
 import com.health.secondbrain.ui.theme.Type
 import kotlinx.coroutines.launch
@@ -84,7 +85,13 @@ fun ChatScreen(organId: String, onBack: () -> Unit) {
                     .border(1.dp, organ.accent, CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                Text(organIcon(organ.id), color = organ.accent, fontSize = 17.sp)
+                OrganAssetIcon(
+                    organId = organ.id,
+                    contentDescription = organ.displayName,
+                    modifier = Modifier
+                        .size(24.dp)
+                        .padding(2.dp)
+                )
             }
             Spacer(Modifier.width(10.dp))
             Column {
@@ -231,15 +238,4 @@ private fun TypingBubble() {
             }
         }
     }
-}
-
-private fun organIcon(id: String): String = when (id) {
-    "heart"  -> "❤"
-    "liver"  -> "◆"
-    "gut"    -> "◉"
-    "sleep"  -> "☾"
-    "lungs"  -> "▲"
-    "kidney" -> "◈"
-    "brain"  -> "✷"
-    else -> "●"
 }
