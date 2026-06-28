@@ -13,6 +13,8 @@ import com.health.secondbrain.features.HealthRiskEngine
 import com.health.secondbrain.model.DeltaDirection
 import com.health.secondbrain.model.Metric
 import com.health.secondbrain.model.OrganNode
+import java.time.Duration
+import java.time.Instant
 import kotlin.math.roundToInt
 
 data class HealthDashboardUiState(
@@ -181,8 +183,9 @@ object HealthDashboardMapper {
         val hrv = watchSnapshot?.hrvRmssd ?: latest.hrvRmssd
         val baselineResting = latest.restingBpm - deltaResting
         val baselineHrv = latest.hrvRmssd - deltaHrv
+        val watchPing = watchSnapshot?.pingText()
         val watchLine = watchSnapshot?.let {
-            "Watch live: Current BPM ${currentBpm?.roundToInt() ?: "n/a"}, resting HR ${restingBpm.roundToInt()}, source ${it.source}."
+            "$watchPing: Current BPM ${currentBpm?.roundToInt() ?: "n/a"}, resting HR ${restingBpm.roundToInt()}, source ${it.source}."
         } ?: "Watch live BPM has not been received yet."
         val ecgLine = ecgSummary?.let {
             val hz = it.samplingHz?.let { value -> "${value.roundToInt()} Hz" } ?: "sampling Hz n/a"
@@ -221,12 +224,12 @@ object HealthDashboardMapper {
             sentenceWeek = "$watchLine Cardiac risk is ${percent(prediction.cardiacDecompScore)}.",
             sentenceMonth = ecgLine,
             sentenceNextStep = if (needsAttention) {
-                "Keep today easy and prioritize sleep until resting HR returns toward baseline."
+                "${watchPing ?: "Watch ping pending"}. Keep today easy and prioritize sleep until resting HR returns toward baseline."
             } else {
-                "Cardiac signals are inside the current MVP guardrails."
+                "${watchPing ?: "Watch ping pending"}. Cardiac signals are inside the current MVP guardrails."
             },
             statusGood = !needsAttention,
-            previewSummary = "${watchSnapshot?.event ?: "Cardiac ${percent(prediction.cardiacDecompScore)}"}, ${ecgSummary?.sampleCount ?: 0} ECG samples.",
+            previewSummary = "${watchPing?.let { "$it - " }.orEmpty()}${watchSnapshot?.event ?: "Cardiac ${percent(prediction.cardiacDecompScore)}"}, ${ecgSummary?.sampleCount ?: 0} ECG samples.",
             chatChips = listOf("Explain my risk score", "What changed today?", "Show ECG evidence"),
         )
     }
@@ -457,4 +460,13 @@ object HealthDashboardMapper {
     }
 
     private fun percent(score: Double): String = "${(score * 100).roundToInt()}%"
+
+    private fun WatchSnapshotSummary.pingText(): String {
+        val ageSeconds = Duration.between(receivedAt, Instant.now()).seconds.coerceAtLeast(0)
+        return if (ageSeconds < 90) {
+            "watch ping just now"
+        } else {
+            "last watch update ${receivedAt.toString().substringBefore('.')}"
+        }
+    }
 }

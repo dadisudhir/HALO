@@ -69,7 +69,7 @@ class HaloHealthRepository(context: Context) {
             )
             val activeAlert = readActiveAlert(writable)
             val watchStatus = watchSnapshot?.let {
-                " - watch current ${it.currentBpm?.toInt() ?: "n/a"} bpm resting ${it.restingBpm?.toInt() ?: "n/a"}"
+                " - ${it.pingText()} current ${it.currentBpm?.toInt() ?: "n/a"} bpm resting ${it.restingBpm?.toInt() ?: "n/a"}"
             }.orEmpty()
             val ecgStatus = ecgSummary?.let {
                 " - ECG ${it.sampleCount} samples ${it.samplingHz?.let { hz -> "${hz.toInt()}Hz" } ?: "hz n/a"}"
@@ -348,6 +348,7 @@ class HaloHealthRepository(context: Context) {
                     restingBpm = restingBpm,
                     hrvRmssd = hrv,
                     capturedAt = capturedAt,
+                    receivedAt = receivedAt,
                     source = source,
                     event = summarizeWatchJson(rawJson),
                 )
@@ -475,6 +476,15 @@ class HaloHealthRepository(context: Context) {
             is String -> value.toDoubleOrNull()
             else -> null
         }
+
+    private fun WatchSnapshotSummary.pingText(): String {
+        val ageSeconds = java.time.Duration.between(receivedAt, Instant.now()).seconds.coerceAtLeast(0)
+        return if (ageSeconds < 90) {
+            "watch ping just now"
+        } else {
+            "last watch update ${receivedAt.toString().substringBefore('.')}"
+        }
+    }
 
     private fun parseInstantOrNull(value: String?): Instant? {
         if (value.isNullOrBlank()) return null

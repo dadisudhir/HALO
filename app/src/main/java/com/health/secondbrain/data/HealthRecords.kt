@@ -122,6 +122,7 @@ data class WatchSnapshotSummary(
     val restingBpm: Double?,
     val hrvRmssd: Double?,
     val capturedAt: Instant,
+    val receivedAt: Instant,
     val source: String,
     val event: String,
 )
