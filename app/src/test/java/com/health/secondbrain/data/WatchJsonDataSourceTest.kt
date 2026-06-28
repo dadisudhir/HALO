@@ -66,4 +66,36 @@ class WatchJsonDataSourceTest {
         assertEquals(1L, ecg.samples[1].sampleIndex)
         assertEquals(0.08, ecg.samples[1].ecgMv)
     }
+
+    @Test
+    fun parsesSimpleBpmPayloadAsCurrentHeartRate() {
+        val payload = parser.parse(
+            rawJson = """{"source":"watch_json_live","bpm":82}""",
+            source = "watch_json_live",
+        )
+
+        assertEquals("watch_json", payload.payloadType)
+        assertEquals("watch_json_live", payload.source)
+        assertEquals(82.0, payload.latestHeartRateBpm)
+        assertNull(payload.ecgPacket)
+    }
+
+    @Test
+    fun parsesSimpleSamplesJsonBpmRows() {
+        val payload = parser.parse(
+            rawJson = """
+                {
+                  "source":"watch_json_live",
+                  "samples":[
+                    {"timestamp":"2026-06-28T10:00:00Z","bpm":80},
+                    {"timestamp":"2026-06-28T10:00:05Z","heartRate":82}
+                  ]
+                }
+            """.trimIndent(),
+            source = "watch_json_live",
+        )
+
+        assertEquals("watch_json", payload.payloadType)
+        assertEquals(82.0, payload.latestHeartRateBpm)
+    }
 }

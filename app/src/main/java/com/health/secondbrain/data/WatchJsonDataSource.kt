@@ -75,6 +75,10 @@ class WatchJsonDataSource {
         val samples = mutableListOf<HeartRateSample>()
         root.optNumber("heart_rate_bpm")?.let { samples += HeartRateSample(capturedAt, it) }
         root.optNumber("heartRateBpm")?.let { samples += HeartRateSample(capturedAt, it) }
+        root.optNumber("current_bpm")?.let { samples += HeartRateSample(capturedAt, it) }
+        root.optNumber("currentBpm")?.let { samples += HeartRateSample(capturedAt, it) }
+        root.optNumber("bpm")?.let { samples += HeartRateSample(capturedAt, it) }
+        root.optNumber("heartRate")?.let { samples += HeartRateSample(capturedAt, it) }
 
         val heartRate = root.optJSONObject("heartRate")
         heartRate?.optNumber("latestBpm")?.let { bpm ->
@@ -101,6 +105,8 @@ class WatchJsonDataSource {
         root.optJSONArray("samples")?.forEachObject { row ->
             val bpm = row.optNumber("heart_rate_bpm")
                 ?: row.optNumber("heartRateBpm")
+                ?: row.optNumber("current_bpm")
+                ?: row.optNumber("currentBpm")
                 ?: row.optNumber("heartRate")
                 ?: row.optNumber("bpm")
             if (bpm != null) {
