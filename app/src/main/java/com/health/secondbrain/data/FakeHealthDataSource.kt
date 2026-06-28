@@ -5,7 +5,6 @@ import android.database.DatabaseUtils
 import android.database.sqlite.SQLiteDatabase
 import java.time.LocalDate
 import java.time.ZoneId
-import kotlin.math.sin
 
 class FakeHealthDataSource {
 
@@ -41,21 +40,40 @@ class FakeHealthDataSource {
     fun seedIfEmpty(database: SQLiteDatabase) {
         if (DatabaseUtils.queryNumEntries(database, "daily_health_summaries") > 0) return
 
+        // --- Cardio + Sleep demo narrative (calibrated against HealthRiskEngine) ---
+        // Staged onset within the last 7 days, anchored relative to today so the
+        // story always reads as "this week":
+        //   7d ago  sleep efficiency 89->77, sleep hours 7.6->6.8  (sleep degrades first)
+        //   6d ago  HRV 58->44                                     (autonomic stress next)
+        //   4d ago  resting 61->70, avg HR 71->80, steps 9300->7600 (cardiac load last)
+        // Target risk scores: arrhythmia ~0.80, cardiac ~0.74, sleep ~0.73.
         val today = LocalDate.now(ZoneId.systemDefault())
         database.beginTransaction()
         try {
             for (daysAgo in 29 downTo 0) {
                 val day = today.minusDays(daysAgo.toLong())
-                val index = 29 - daysAgo
-                val lateRecoveryPenalty = if (daysAgo <= 5) 1.0 else 0.0
-                val wave = sin(index / 2.6)
-                val resting = 59.5 + index * 0.10 + lateRecoveryPenalty * 3.2 + wave * 0.9
-                val averageHr = 76.0 + index * 0.08 + lateRecoveryPenalty * 2.4 + wave * 1.3
-                val steps = (8200 + wave * 900 - lateRecoveryPenalty * 1700 + (index % 4) * 260).toInt()
-                val sleepHours = 7.45 - lateRecoveryPenalty * 0.72 - (index % 5) * 0.04
-                val sleepEfficiency = 88.0 - lateRecoveryPenalty * 5.5 - (index % 4) * 0.8
-                val hrv = 55.0 - index * 0.14 - lateRecoveryPenalty * 5.0 + wave * 1.6
-                val hydration = 71.0 - lateRecoveryPenalty * 6.5 + (index % 3) * 1.2
+
+                var resting = 61.0
+                var averageHr = 71.0
+                var steps = 9300
+                var sleepHours = 7.6
+                var sleepEfficiency = 89.0
+                var hrv = 58.0
+                var hydration = 71.0
+
+                if (daysAgo <= 7) {            // sleep disruption begins
+                    sleepEfficiency = 77.0
+                    sleepHours = 6.8
+                    hydration = 67.0
+                }
+                if (daysAgo <= 6) {            // HRV collapse follows
+                    hrv = 44.0
+                }
+                if (daysAgo <= 4) {            // cardiovascular strain last
+                    resting = 70.0
+                    averageHr = 80.0
+                    steps = 7600
+                }
 
                 database.insertWithOnConflict(
                     "daily_health_summaries",
@@ -69,7 +87,7 @@ class FakeHealthDataSource {
                         put("sleep_efficiency", sleepEfficiency)
                         put("hrv_rmssd", hrv)
                         put("hydration_percent", hydration)
-                        put("source", "fake_periodic_seed")
+                        put("source", "cardio_sleep_demo")
                     },
                     SQLiteDatabase.CONFLICT_REPLACE
                 )
