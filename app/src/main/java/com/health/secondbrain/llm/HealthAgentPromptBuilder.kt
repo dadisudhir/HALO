@@ -3,14 +3,45 @@ package com.health.secondbrain.llm
 import com.health.secondbrain.data.HealthAgentContext
 
 object HealthAgentPromptBuilder {
-    fun buildChatPrompt(
+    fun buildPlanPrompt(
         context: HealthAgentContext,
         userMessage: String,
+    ): String {
+        return """
+            <|im_start|>system
+            Route the message. Output one capital letter only.
+            A=no_action for greetings, thanks, casual chat.
+            B=data_recall for my/current/watch/HALO/graph/card/dashboard/status/baseline/risk/next-step.
+            C=web_search for explicit search/web/latest/source/research/study/evidence/guideline requests.
+            D=clarify for unclear short typos.
+            <|im_end|>
+            <|im_start|>user
+            /no_think
+            organ=${context.organ.id}
+            msg=${userMessage.replace(Regex("\\s+"), " ").trim().take(MAX_PLAN_MESSAGE_CHARS)}
+            <|im_end|>
+            <|im_start|>assistant
+        """.trimIndent()
+    }
+
+    internal fun buildChatPrompt(
+        context: HealthAgentContext,
+        userMessage: String,
+        plan: AgentPlan,
         toolResult: ToolCallResult? = null,
     ): String {
+        val includeHealthContext = plan.needsHealthContext
+        val healthBlock = if (includeHealthContext) {
+            """
+            HALO_SIGNAL_CONTEXT:
+            ${compactHealthContext(context)}
+            """.trimIndent()
+        } else {
+            "HALO_SIGNAL_CONTEXT: omitted_for_this_route"
+        }
         val toolBlock = toolResult?.let {
             """
-            WEB_TOOL_RESULT:
+            web_result:
             tool=${it.tool}
             content=${it.content.take(MAX_TOOL_CHARS)}
             """.trimIndent()
@@ -18,29 +49,71 @@ object HealthAgentPromptBuilder {
 
         return """
             <|im_start|>system
-            You are HALO, an on-device health interpretation assistant.
-            Use only the user-provided HEALTH_CONTEXT_JSON and WEB_TOOL_RESULT.
-            Think through the facts before answering, but final output must be concise plain text.
-            If recorded_daily_count is 0, say recorded biometrics are not available and do not infer personal risk.
-            Never use demo, fake, seed, synthetic, or display-only values for personal conclusions.
-            Do not diagnose disease or claim medical certainty.
-            If a metric is missing, say it is not available.
-            Keep the final answer to 2 to 4 short sentences.
+            You are HALO. Final answer only. Use exact provided values only.
+            No thinking tags. No JSON. No extra numbers. Stop after the answer.
             <|im_end|>
             <|im_start|>user
-            /think
-
-            HEALTH_CONTEXT_JSON:
-            ${context.toPromptJson()}
-
+            /no_think
+            route=${plan.route.wireName}
+            guidance=${routeGuidance(plan)}
+            $healthBlock
             $toolBlock
-
-            USER_MESSAGE:
-            $userMessage
+            user_message=${userMessage.replace(Regex("\\s+"), " ").trim().take(MAX_MESSAGE_CHARS)}
             <|im_end|>
             <|im_start|>assistant
+            HALO_RESPONSE:
         """.trimIndent()
     }
 
+    private fun compactHealthContext(context: HealthAgentContext): String {
+        val organ = context.organ
+        val visibleMetrics = organ.metrics
+            .joinToString("; ") { metric ->
+                val delta = metric.deltaText.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+                "${metric.label} ${metric.value}$delta"
+            }
+            .ifBlank { "none" }
+        return """
+            organ=${organ.displayName}
+            system=${organ.systemLabel}
+            route_context=current ${organ.displayName.lowercase()} view
+            recorded_daily_count=${context.recordedDailySummaries.size}
+            has_recorded_biometrics=${context.hasRecordedBiometrics}
+            visible_card_context=true
+            status_card=${if (organ.statusGood) "stable" else "needs_attention"}
+            visible_metrics=$visibleMetrics
+            week_summary=${organ.sentenceWeek}
+            month_summary=${organ.sentenceMonth}
+            next_step=${organ.sentenceNextStep}
+            policy=visible card values can be described as HALO UI context only; do not call them live watch-recorded medical conclusions.
+        """.trimIndent()
+    }
+
+    private fun routeGuidance(plan: AgentPlan): String =
+        when (plan.route) {
+            AgentRoute.Smalltalk ->
+                "Reply conversationally in one short sentence. Do not mention biometrics."
+
+            AgentRoute.Clarify ->
+                "Ask one concise clarification question. Do not infer health status."
+
+            AgentRoute.LocalContext ->
+                "Explain the visible HALO graph/card. Mention at least one exact visible_metrics value."
+
+            AgentRoute.HealthStatus ->
+                "Summarize the HALO card status. If status_card=needs_attention, do not say normal or stable. Mention exact visible_metrics. If recorded_daily_count=0, say this is visible HALO card context, not live watch-recorded medical conclusion."
+
+            AgentRoute.NextStep ->
+                "Give one bounded next step from next_step. Mention it is based on HALO card context if recorded_daily_count=0."
+
+            AgentRoute.GeneralHealth ->
+                "Answer from HALO context. Mention exact visible_metrics if present."
+
+            AgentRoute.WebResearch ->
+                "Use WEB_TOOL_RESULT source titles/domains if provided. If the tool failed or no web result is provided, say the search context is unavailable."
+        }
+
     private const val MAX_TOOL_CHARS = 900
+    private const val MAX_PLAN_MESSAGE_CHARS = 160
+    private const val MAX_MESSAGE_CHARS = 160
 }

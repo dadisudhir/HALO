@@ -15,17 +15,22 @@ data class ToolCallResult(
     val content: String,
 )
 
+interface AgentToolClient {
+    suspend fun webSearch(query: String): ToolCallResult
+    suspend fun fetch(url: String): ToolCallResult
+}
+
 class ToolBridgeClient(
     private val baseUrl: String = DEFAULT_BASE_URL,
-) {
-    suspend fun webSearch(query: String): ToolCallResult = withContext(Dispatchers.IO) {
+) : AgentToolClient {
+    override suspend fun webSearch(query: String): ToolCallResult = withContext(Dispatchers.IO) {
         postTool(
             name = "web_search",
             payload = JSONObject().put("query", query),
         )
     }
 
-    suspend fun fetch(url: String): ToolCallResult = withContext(Dispatchers.IO) {
+    override suspend fun fetch(url: String): ToolCallResult = withContext(Dispatchers.IO) {
         postTool(
             name = "fetch",
             payload = JSONObject().put("url", url),

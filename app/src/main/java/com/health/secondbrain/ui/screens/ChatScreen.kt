@@ -27,8 +27,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import android.os.Handler
-import android.os.Looper
 import com.health.secondbrain.data.HaloHealthRepository
 import com.health.secondbrain.data.HealthBackendMode
 import com.health.secondbrain.llm.AgentVisual
@@ -63,7 +61,6 @@ fun ChatScreen(
     val llm = remember(context) { OnDeviceLlmService(context.applicationContext) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     var messages by remember(organ.id) {
         mutableStateOf<List<ChatMsg>>(
@@ -81,20 +78,11 @@ fun ChatScreen(
         messages = messages + ChatMsg.User(text) + ChatMsg.Typing
         input = ""
         scope.launch {
-            var streamActive = true
             val reply = runCatching {
                 val agentContext = repository.loadAgentContext(mode, organ)
                 llm.generateChat(
                     context = agentContext,
                     userMessage = text,
-                    onToken = { delta ->
-                        if (delta.isBlank()) return@generateChat
-                        mainHandler.post {
-                            if (streamActive) {
-                                messages = appendAssistantDelta(messages, delta)
-                            }
-                        }
-                    },
                 )
             }.getOrElse { error ->
                 AgentResponse(
@@ -102,7 +90,6 @@ fun ChatScreen(
                     statusLine = "context unavailable",
                 )
             }
-            streamActive = false
             val status = reply.statusLine?.let { ChatMsg.Status(it) }
             val graph = reply.visual
                 ?.takeIf { it.domainId == organ.id }
@@ -216,16 +203,6 @@ fun ChatScreen(
                 Text("↑", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             }
         }
-    }
-}
-
-private fun appendAssistantDelta(messages: List<ChatMsg>, delta: String): List<ChatMsg> {
-    val withoutTyping = messages.filterNot { it is ChatMsg.Typing }
-    val last = withoutTyping.lastOrNull()
-    return if (last is ChatMsg.Ai) {
-        withoutTyping.dropLast(1) + last.copy(text = last.text + delta)
-    } else {
-        withoutTyping + ChatMsg.Ai(delta)
     }
 }
 
