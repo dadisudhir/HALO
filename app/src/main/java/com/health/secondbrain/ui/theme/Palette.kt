@@ -3,55 +3,54 @@ package com.health.secondbrain.ui.theme
 import androidx.compose.ui.graphics.Color
 
 /**
- * Unified dark-mode palette. We intentionally diverge from the source spec
- * (which switches to a light background on detail screens) and keep every
- * surface dark for OLED/contrast and visual consistency.
+ * Light-mode palette inspired by Headspace.
+ * Warm, welcoming, friendly colors with white background.
  */
 object Palette {
-    // Backgrounds
-    val BgBase        = Color(0xFF0B0D10)   // app background
-    val BgRadialMid   = Color(0xFF161A22)   // home radial gradient center
-    val Surface       = Color(0xFF14171C)   // cards
-    val SurfaceElev   = Color(0xFF1C2027)   // raised cards / chat bubble
-    val Border        = Color(0xFF262B33)
-    val BorderSubtle  = Color(0xFF1C2027)
+    // Backgrounds (Light Theme)
+    val BgBase        = Color(0xFFFFFFFF)   // app background (white)
+    val BgRadialMid   = Color(0xFFFFFBF7)   // soft cream
+    val Surface       = Color(0xFFFFF5F0)   // soft peach cards
+    val SurfaceElev   = Color(0xFFFFFFFF)   // white for elevated elements
+    val Border        = Color(0xFFFFE8DC)   // soft peach border
+    val BorderSubtle  = Color(0xFFFFF5F0)   // very subtle
 
-    // Text
-    val TextPrimary   = Color(0xFFECEAE4)
-    val TextSecondary = Color(0xFF8B8F99)
-    val TextMuted     = Color(0xFF5E626B)
+    // Text (Light Theme)
+    val TextPrimary   = Color(0xFF2C2C2C)   // dark charcoal
+    val TextSecondary = Color(0xFF666666)   // medium gray
+    val TextMuted     = Color(0xFF999999)   // light gray
 
     // Bubble decoration
-    val BubbleUnfilledFill   = Color(0xFF14171C)
-    val BubbleUnfilledStroke = Color(0xFF262B33)
+    val BubbleUnfilledFill   = Color(0xFFFFFFFF)
+    val BubbleUnfilledStroke = Color(0xFFFFE8DC)
 
-    // Status / semantic
-    val Healthy   = Color(0xFF6BCB77)
-    val Warning   = Color(0xFFF2A65A)
-    val Urgent    = Color(0xFFFF6B6B)
+    // Status / semantic (Warm Theme)
+    val Healthy   = Color(0xFF6BCB77)       // warm green
+    val Warning   = Color(0xFFFFB84D)       // warm orange
+    val Urgent    = Color(0xFFFF6B6B)       // coral red
 
-    // Organ accents (dark-mode tuned)
-    val Heart   = Color(0xFFFF6B6B)
-    val Liver   = Color(0xFFF2A65A)
-    val Gut     = Color(0xFF6BCB77)
-    val Sleep   = Color(0xFF6B8AFF)
-    val Lungs   = Color(0xFF4FD1C5)
-    val Kidney  = Color(0xFFB97AE0)
-    val Brain   = Color(0xFFF178B6)
+    // Organ accents (Light-mode tuned)
+    val Heart   = Color(0xFFFF8A5B)         // warm coral (Headspace-inspired)
+    val Liver   = Color(0xFFFFB84D)         // warm orange
+    val Gut     = Color(0xFF6BCB77)         // warm green
+    val Sleep   = Color(0xFF7BA3FF)         // soft blue
+    val Lungs   = Color(0xFF4FD1C5)         // teal
+    val Kidney  = Color(0xFFD9A8E6)         // soft purple
+    val Brain   = Color(0xFFF178B6)         // coral pink
 
-    // Next step card (dark-mode green-tinted)
-    val NextStepBg     = Color(0xFF13241C)
-    val NextStepBorder = Color(0xFF1F4A2E)
-    val NextStepLabel  = Color(0xFF8FD49A)
-    val NextStepText   = Color(0xFFCDE6D3)
+    // Next step card
+    val NextStepBg     = Color(0xFFFFF5F0)
+    val NextStepBorder = Color(0xFFFFE8DC)
+    val NextStepLabel  = Color(0xFF2C2C2C)
+    val NextStepText   = Color(0xFF666666)
 
     // Sentiment labels
-    val SentimentWeek  = Color(0xFFFF8A75)
-    val SentimentMonth = Color(0xFFF2A65A)
+    val SentimentWeek  = Color(0xFFFF8A5B)
+    val SentimentMonth = Color(0xFFFFB84D)
 
     // Chat
-    val UserBubble     = Color(0xFFECEAE4)   // user message bg (light pill on dark)
-    val UserBubbleText = Color(0xFF14171C)
-    val AiBubble       = SurfaceElev
+    val UserBubble     = Color(0xFFFF8A5B)   // coral pill
+    val UserBubbleText = Color(0xFFFFFFFF)   // white text
+    val AiBubble       = Color(0xFFFFF5F0)   // peach
     val AiBubbleText   = TextPrimary
 }

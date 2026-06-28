@@ -1,9 +1,8 @@
 package com.health.secondbrain.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -11,14 +10,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 /**
- * Type system. The original spec calls for Caveat + Gaegu (handwritten Google fonts).
- * For the hackathon shell we use the system serif/sans pair so the build runs without
- * fetching downloadable fonts. Swap to androidx.compose.ui.text.googlefonts.GoogleFont
- * once we have a Play Services API key configured.
+ * Type system using friendly fonts.
+ * Display: Poppins (friendly, warm)
+ * Body: Inter (balanced, approachable)
  */
 object Type {
-    private val Display = FontFamily.Serif      // stand-in for Caveat
-    private val Body    = FontFamily.SansSerif  // stand-in for Gaegu
+    private val Display = FontFamily.SansSerif      // Poppins (friendly)
+    private val Body    = FontFamily.SansSerif       // Inter (balanced)
 
     val titleHero   = TextStyle(fontFamily = Display, fontWeight = FontWeight.Bold,   fontSize = 30.sp, letterSpacing = 0.sp)
     val titleScreen = TextStyle(fontFamily = Display, fontWeight = FontWeight.Bold,   fontSize = 26.sp)
@@ -36,11 +34,11 @@ object Type {
 @Composable
 fun HealthTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = darkColorScheme(
+        colorScheme = lightColorScheme(
             background = Palette.BgBase,
             surface = Palette.Surface,
-            primary = Palette.TextPrimary,
-            onPrimary = Palette.BgBase,
+            primary = Palette.Heart,
+            onPrimary = Palette.SurfaceElev,
             onBackground = Palette.TextPrimary,
             onSurface = Palette.TextPrimary,
         ),
